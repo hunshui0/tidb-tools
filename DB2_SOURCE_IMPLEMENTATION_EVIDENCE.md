@@ -38,6 +38,26 @@ from offline test evidence.
 pre-existing CRLF conversion is intentionally preserved. Every implementation
 commit is staged from a normalized blob and passed `git diff --cached --check`.
 
+Final targeted verification passed:
+
+```text
+go test ./sync_diff_inspector/config ./sync_diff_inspector/db2util \
+  ./sync_diff_inspector/canonical ./sync_diff_inspector/source \
+  ./sync_diff_inspector/utils
+go vet ./sync_diff_inspector/db2util ./sync_diff_inspector/canonical \
+  ./sync_diff_inspector/source ./sync_diff_inspector/utils
+```
+
+The native-driver probe behaved as expected for this host:
+
+```text
+go test -tags db2cli ./sync_diff_inspector/db2util
+fatal error: sqlcli1.h: No such file or directory
+```
+
+This confirms that the Db2 CLI headers are absent; it is not a successful
+native-driver build.
+
 ## Real database evidence
 
 No Db2 CLI client, Db2 LUW 11.5 server, or TiDB server is available in this
