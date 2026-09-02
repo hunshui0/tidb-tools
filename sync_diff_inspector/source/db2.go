@@ -20,9 +20,10 @@ import (
 // DB2Source is deliberately single-instance. It never produces repair SQL;
 // repair SQL remains a TiDB target responsibility.
 type DB2Source struct {
-	tableDiffs []*common.TableDiff
-	dbConn     *sql.DB
-	schema     string
+	tableDiffs    []*common.TableDiff
+	dbConn        *sql.DB
+	schema        string
+	sourceColumns map[int]map[string]string
 }
 
 type DB2TableAnalyzer struct{}
@@ -46,7 +47,7 @@ func (i *db2SingleChunkIterator) Next() (*chunk.Range, error) {
 		return nil, nil
 	}
 	i.done = true
-	return &chunk.Range{Index: &chunk.ChunkID{ChunkIndex: 0, ChunkCnt: 1}, Type: chunk.Others, IsFirst: true, IsLast: true}, nil
+	return &chunk.Range{Index: &chunk.ChunkID{ChunkIndex: 0, ChunkCnt: 1}, Type: chunk.Others, IsFirst: true, IsLast: true, Where: "TRUE"}, nil
 }
 func (*db2SingleChunkIterator) Close() {}
 
@@ -58,15 +59,30 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 	if schema == "" {
 		return nil, errors.New("db2 source requires schema")
 	}
-	for _, table := range tableDiffs {
+	sourceColumns := make(map[int]map[string]string, len(tableDiffs))
+	for index, table := range tableDiffs {
 		if !common.AllTableExist(table.TableLack) {
 			continue
 		}
-		if _, err := db2util.ReadTableInfo(ctx, ds.Conn, schema, table.Table); err != nil {
+		info, err := db2util.ReadTableInfo(ctx, ds.Conn, schema, table.Table)
+		if err != nil {
 			return nil, errors.Trace(err)
 		}
+		mapped := make(map[string]string, len(table.Info.Columns))
+		for _, targetColumn := range table.Info.Columns {
+			for _, sourceColumn := range info.Columns {
+				if strings.EqualFold(targetColumn.Name.O, sourceColumn.Name.O) {
+					mapped[targetColumn.Name.O] = sourceColumn.Name.O
+					break
+				}
+			}
+			if mapped[targetColumn.Name.O] == "" {
+				return nil, errors.Errorf("db2 table %s.%s has no column compatible with target column %s", schema, table.Table, targetColumn.Name.O)
+			}
+		}
+		sourceColumns[index] = mapped
 	}
-	return &DB2Source{tableDiffs: tableDiffs, dbConn: ds.Conn, schema: db2util.NormalizeIdentifier(schema)}, nil
+	return &DB2Source{tableDiffs: tableDiffs, dbConn: ds.Conn, schema: db2util.NormalizeIdentifier(schema), sourceColumns: sourceColumns}, nil
 }
 
 func (s *DB2Source) GetTableAnalyzer() TableAnalyzer { return DB2TableAnalyzer{} }
@@ -111,11 +127,11 @@ func (s *DB2Source) GetRowsIterator(ctx context.Context, r *splitter.RangeInfo) 
 	for _, column := range table.Info.Columns {
 		// DB2 catalog names default to uppercase; the quoted alias preserves the
 		// target column key expected by the existing comparison layer.
-		columns = append(columns, db2util.QuoteIdentifier(column.Name.O)+" AS "+db2util.QuoteIdentifier(column.Name.O))
+		columns = append(columns, db2util.QuoteIdentifier(s.sourceColumns[r.GetTableIndex()][column.Name.O])+" AS "+db2util.QuoteIdentifier(column.Name.O))
 	}
 	order := make([]string, 0)
 	for _, column := range dbutil.SelectUniqueOrderKey(table.Info) {
-		order = append(order, db2util.QuoteIdentifier(column.Name.O))
+		order = append(order, db2util.QuoteIdentifier(s.sourceColumns[r.GetTableIndex()][column.Name.O]))
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(columns, ", "), db2util.QualifiedTable(schema, sourceTable))
 	if len(order) > 0 {
