@@ -18,7 +18,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -34,8 +33,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/charset"
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/collate"
 	"go.uber.org/zap"
 )
 
@@ -541,14 +538,6 @@ func CompareData(map1, map2 map[string]*dbutil.ColumnData, orderKeyCols, columns
 		ok           bool
 	)
 
-	if collation == "" {
-		collation = "utf8mb4_bin"
-	}
-	collator := collate.GetCollator(collation)
-
-	// For string comparison, ctx is not used, so just create a dummy context.
-	dummyCtx := types.Context{}
-
 	equal = true
 
 	defer func() {
@@ -574,21 +563,7 @@ func CompareData(map1, map2 map[string]*dbutil.ColumnData, orderKeyCols, columns
 		}
 		str1 = string(data1.Data)
 		str2 = string(data2.Data)
-		if column.FieldType.GetType() == mysql.TypeFloat || column.FieldType.GetType() == mysql.TypeDouble {
-			if data1.IsNull && data2.IsNull {
-				continue
-			} else if !data1.IsNull && !data2.IsNull {
-				num1, err1 := strconv.ParseFloat(str1, 64)
-				num2, err2 := strconv.ParseFloat(str2, 64)
-				if err1 != nil || err2 != nil {
-					err = errors.Errorf("convert %s, %s to float failed, err1: %v, err2: %v", str1, str2, err1, err2)
-					return
-				}
-				if math.Abs(num1-num2) <= 1e-6 {
-					continue
-				}
-			}
-		} else if column.FieldType.GetType() == mysql.TypeJSON {
+		if column.FieldType.GetType() == mysql.TypeJSON {
 			if (str1 == str2) || (data1.IsNull && data2.IsNull) {
 				continue
 			}
@@ -606,10 +581,11 @@ func CompareData(map1, map2 map[string]*dbutil.ColumnData, orderKeyCols, columns
 					continue
 				}
 			}
-		} else {
-			if (str1 == str2) && (data1.IsNull == data2.IsNull) {
-				continue
-			}
+		} else if typedCmp, typedErr := compareColumnData(data1, data2, column, collation); typedErr != nil {
+			err = typedErr
+			return
+		} else if typedCmp == 0 {
+			continue
 		}
 
 		equal = false
@@ -632,46 +608,11 @@ func CompareData(map1, map2 map[string]*dbutil.ColumnData, orderKeyCols, columns
 			return
 		}
 
-		if NeedQuotes(col.FieldType.GetType()) {
-			strData1 := types.NewCollationStringDatum(string(data1.Data), collation)
-			strData2 := types.NewCollationStringDatum(string(data2.Data), collation)
-			cmp, err = strData1.Compare(dummyCtx, &strData2, collator)
-			if err != nil {
-				return false, 0, errors.Trace(err)
-			}
-
-			if cmp == 0 {
-				continue
-			}
-			break
-		} else if data1.IsNull || data2.IsNull {
-			if data1.IsNull && data2.IsNull {
-				continue
-			}
-
-			if data1.IsNull {
-				cmp = -1
-			} else {
-				cmp = 1
-			}
-			break
-		} else {
-			num1, err1 := strconv.ParseFloat(string(data1.Data), 64)
-			num2, err2 := strconv.ParseFloat(string(data2.Data), 64)
-			if err1 != nil || err2 != nil {
-				err = errors.Errorf("convert %s, %s to float failed, err1: %v, err2: %v", string(data1.Data), string(data2.Data), err1, err2)
-				return
-			}
-
-			if num1 == num2 {
-				continue
-			}
-
-			if num1 < num2 {
-				cmp = -1
-			} else {
-				cmp = 1
-			}
+		cmp, err = compareColumnData(data1, data2, col, collation)
+		if err != nil {
+			return false, 0, errors.Trace(err)
+		}
+		if cmp != 0 {
 			break
 		}
 	}
