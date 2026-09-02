@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -645,11 +644,4 @@ func pathExists(_path string) (bool, error) {
 		return false, errors.Trace(err)
 	}
 	return true, nil
-}
-
-func mkdirAll(base string) error {
-	mask := syscall.Umask(0)
-	err := os.MkdirAll(base, LocalDirPerm)
-	syscall.Umask(mask)
-	return errors.Trace(err)
 }

@@ -1,35 +1,35 @@
-# tidb-tools
+# sync-diff standalone branch
 
-tidb-tools are some useful tool collections for [TiDB](https://github.com/pingcap/tidb).
+This branch is a focused development base for `sync_diff_inspector`, retained
+from [`tidb-tools`](https://github.com/pingcap/tidb-tools). It preserves the
+existing MySQL/TiDB comparison behavior and its required internal packages so
+that a DB2 source can be added incrementally.
 
-## How to build
+The Go module path deliberately remains `github.com/pingcap/tidb-tools` on
+this branch. Existing internal imports and version metadata therefore continue
+to resolve locally without a broad, unverified import-path rewrite.
 
+## Build and test
+
+```text
+make build
+make test
 ```
-make build # build all tools
 
-make importer # build importer
+The binary is written to `bin/sync_diff_inspector`. See
+[`sync_diff_inspector/README.md`](sync_diff_inspector/README.md) for usage and
+configuration examples.
 
-make sync_diff_inspector # build sync_diff_inspector
+## Retained internal packages
 
-make ddl_checker  # build ddl_checker
-```
-
-When tidb-tools are built successfully, you can find the binary in the `bin` directory.
-
-## Tool list
-
-- [importer](./importer)
-
-    A tool for generating and inserting data to any database which is compatible with the MySQL protocol, like MySQL and TiDB.
-
-- [sync_diff_inspector](./sync_diff_inspector)
-
-    A tool for comparing two databases' data and outputting a brief report about the differences.
-
-- [ddl_checker](./ddl_checker)
-
-    A tool for checking if DDL SQL can be successfully executed by TiDB.
+- `pkg/dbutil`
+- `pkg/filter`
+- `pkg/table-filter`
+- `pkg/table-rule-selector`
+- `pkg/column-mapping`
+- `pkg/utils`
+- `pkg/schemacmp` (test support for `pkg/dbutil`)
 
 ## License
 
-Apache 2.0 license. See the [LICENSE](./LICENSE) file for details.
+Apache 2.0. See [LICENSE](LICENSE).
