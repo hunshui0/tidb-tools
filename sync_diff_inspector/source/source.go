@@ -27,6 +27,7 @@ import (
 	"github.com/pingcap/tidb-tools/pkg/filter"
 	tableFilter "github.com/pingcap/tidb-tools/pkg/table-filter"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/config"
+	"github.com/pingcap/tidb-tools/sync_diff_inspector/db2util"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/source/common"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/splitter"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/utils"
@@ -51,6 +52,10 @@ const (
 
 type ChecksumInfo struct {
 	Checksum uint64
+	Digest   [32]byte
+	// Algorithm is empty for legacy MySQL/TiDB server MD5 checksums. Db2 ->
+	// TiDB uses CanonicalV1 on both sides and refuses cross-algorithm equality.
+	Algorithm string
 	Count    int64
 	Err      error
 	Cost     time.Duration
@@ -218,12 +223,29 @@ func NewSources(ctx context.Context, cfg *config.Config) (downstream Source, ups
 	if err != nil {
 		return nil, nil, errors.Annotate(err, "from downstream")
 	}
+	if len(cfg.Task.SourceInstances) == 1 && cfg.Task.SourceInstances[0].DatabaseType() == config.DatabaseTypeDB2 {
+		// A database-specific checksum cannot be compared across DB2 and TiDB.
+		// Wrap both endpoints so every chunk uses CanonicalV1 in Go.
+		upstream = CanonicalSource{Source: upstream}
+		downstream = CanonicalSource{Source: downstream}
+	}
 	return downstream, upstream, nil
 }
 
 func buildSourceFromCfg(ctx context.Context, tableDiffs []*common.TableDiff, connCount int, bucketSpliterPool *utils.WorkerPool, skipNonExistingTable bool, f tableFilter.Filter, dbs ...*config.DataSource) (Source, error) {
 	if len(dbs) < 1 {
 		return nil, errors.Errorf("no db config detected")
+	}
+	if len(dbs) == 1 && dbs[0].DatabaseType() == config.DatabaseTypeDB2 {
+		return NewDB2Source(ctx, tableDiffs, dbs[0])
+	}
+	if len(dbs) == 1 && !dbs[0].IsAutoDetected() {
+		switch dbs[0].DatabaseType() {
+		case config.DatabaseTypeTiDB:
+			return NewTiDBSource(ctx, tableDiffs, dbs[0], bucketSpliterPool, f, skipNonExistingTable)
+		case config.DatabaseTypeMySQL:
+			return NewMySQLSources(ctx, tableDiffs, dbs, connCount, f, skipNonExistingTable)
+		}
 	}
 	ok, err := dbutil.IsTiDB(ctx, dbs[0].Conn)
 	if err != nil {
@@ -273,11 +295,7 @@ func initDBConn(ctx context.Context, cfg *config.Config) error {
 	}
 	// we had `cfg.SplitThreadCount` producers and `cfg.CheckThreadCount` consumer to use db connections maybe and `cfg.CheckThreadCount` splitter to split buckets.
 	// so the connection count need to be cfg.SplitThreadCount + cfg.CheckThreadCount + cfg.CheckThreadCount.
-	targetConn, err := common.ConnectMySQL(
-		&cfg.Task.TargetInstance.SessionConfig,
-		cfg.Task.TargetInstance.ToDriverConfig(),
-		cfg.SplitThreadCount+2*cfg.CheckThreadCount,
-	)
+	targetConn, err := connectDataSource(ctx, cfg.Task.TargetInstance, cfg.SplitThreadCount+2*cfg.CheckThreadCount)
 	if err != nil {
 		log.Error("failed to configure session", zap.String("data-source", cfg.Task.Target), zap.Error(err))
 		return errors.Trace(err)
@@ -292,11 +310,7 @@ func initDBConn(ctx context.Context, cfg *config.Config) error {
 			return errors.Errorf("'auto' snapshot should be set on both target and source")
 		}
 		// connect source db with target db time_zone
-		conn, err := common.ConnectMySQL(
-			&source.SessionConfig,
-			source.ToDriverConfig(),
-			cfg.SplitThreadCount+2*cfg.CheckThreadCount,
-		)
+		conn, err := connectDataSource(ctx, source, cfg.SplitThreadCount+2*cfg.CheckThreadCount)
 		if err != nil {
 			log.Error("failed to configure session", zap.String("data-source", cfg.Task.Source[sourceIdx]), zap.Error(err))
 			return errors.Trace(err)
@@ -304,6 +318,13 @@ func initDBConn(ctx context.Context, cfg *config.Config) error {
 		source.Conn = conn
 	}
 	return nil
+}
+
+func connectDataSource(ctx context.Context, ds *config.DataSource, connectionCount int) (*sql.DB, error) {
+	if ds.DatabaseType() == config.DatabaseTypeDB2 {
+		return db2util.Connect(ctx, ds, connectionCount)
+	}
+	return common.ConnectMySQL(&ds.SessionConfig, ds.ToDriverConfig(), connectionCount)
 }
 
 func initTables(ctx context.Context, cfg *config.Config) (cfgTables []*config.TableConfig, err error) {

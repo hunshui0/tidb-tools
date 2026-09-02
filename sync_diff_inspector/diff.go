@@ -622,7 +622,7 @@ func (df *Diff) compareChecksumAndGetCount(ctx context.Context, tableRange *spli
 
 	}
 
-	if upstreamInfo.Count == downstreamInfo.Count && upstreamInfo.Checksum == downstreamInfo.Checksum {
+	if upstreamInfo.Count == downstreamInfo.Count && checksumEqual(upstreamInfo, downstreamInfo) {
 		return true, upstreamInfo.Count, downstreamInfo.Count, nil
 	}
 	log.Debug("checksum doesn't match, need to compare rows",
@@ -633,6 +633,13 @@ func (df *Diff) compareChecksumAndGetCount(ctx context.Context, tableRange *spli
 		zap.Uint64("upstream checksum", upstreamInfo.Checksum),
 		zap.Uint64("downstream checksum", downstreamInfo.Checksum))
 	return false, upstreamInfo.Count, downstreamInfo.Count, nil
+}
+
+func checksumEqual(upstream, downstream *source.ChecksumInfo) bool {
+	if upstream.Algorithm != "" || downstream.Algorithm != "" {
+		return upstream.Algorithm != "" && upstream.Algorithm == downstream.Algorithm && upstream.Digest == downstream.Digest
+	}
+	return upstream.Checksum == downstream.Checksum
 }
 
 func (df *Diff) compareRows(ctx context.Context, rangeInfo *splitter.RangeInfo, dml *ChunkDML) (bool, error) {
