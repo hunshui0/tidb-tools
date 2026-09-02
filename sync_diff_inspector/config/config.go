@@ -51,6 +51,10 @@ const (
 	baseSplitThreadCount = 3
 
 	UnifiedTimeZone string = "+0:00"
+
+	DatabaseTypeMySQL = "mysql"
+	DatabaseTypeTiDB  = "tidb"
+	DatabaseTypeDB2   = "db2"
 )
 
 // TableConfig is the config of table.
@@ -107,8 +111,15 @@ type Security struct {
 
 // DataSource represents the Source Config.
 type DataSource struct {
+	// Type is optional for backwards compatibility. An empty value preserves the
+	// historical MySQL/TiDB auto-detection path.
+	Type            string             `toml:"type" json:"type,omitempty"`
 	Host            string             `toml:"host" json:"host"`
 	Port            int                `toml:"port" json:"port"`
+	Database        string             `toml:"database" json:"database,omitempty"`
+	Schema          string             `toml:"schema" json:"schema,omitempty"`
+	ConnectTimeout  string             `toml:"connect-timeout" json:"connect-timeout,omitempty"`
+	ConnectionParams map[string]string `toml:"connection-params" json:"connection-params,omitempty"`
 	User            string             `toml:"user" json:"user"`
 	Password        utils.SecretString `toml:"password" json:"password"`
 	SqlMode         string             `toml:"sql-mode" json:"sql-mode"`
@@ -123,6 +134,35 @@ type DataSource struct {
 
 	Conn          *sql.DB
 	SessionConfig SessionConfig `toml:"session" json:"session"`
+}
+
+// DatabaseType returns the configured database type. Empty is MySQL for
+// connection purposes, while source construction retains its legacy
+// MySQL/TiDB auto-detection when Type is empty.
+func (d *DataSource) DatabaseType() string {
+	typ := strings.ToLower(strings.TrimSpace(d.Type))
+	if typ == "" {
+		return DatabaseTypeMySQL
+	}
+	return typ
+}
+
+func (d *DataSource) IsAutoDetected() bool {
+	return strings.TrimSpace(d.Type) == ""
+}
+
+func (d *DataSource) ValidateDatabaseType() error {
+	switch d.DatabaseType() {
+	case DatabaseTypeMySQL, DatabaseTypeTiDB:
+		return nil
+	case DatabaseTypeDB2:
+		if d.Database == "" {
+			return errors.New("db2 data source requires database")
+		}
+		return nil
+	default:
+		return errors.Errorf("unsupported data source type %q (supported: mysql, tidb, db2)", d.Type)
+	}
 }
 
 // IsAutoSnapshot returns true if the tidb_snapshot is expected to automatically
@@ -149,6 +189,10 @@ func (d *DataSource) ToDBConfig() *dbutil.DBConfig {
 
 // register TLS config for driver
 func (d *DataSource) RegisterTLS() error {
+	if d.DatabaseType() == DatabaseTypeDB2 {
+		// Db2 CLI TLS options are DSN properties, not MySQL driver TLS configs.
+		return nil
+	}
 	if d.Security == nil {
 		return nil
 	}
@@ -240,6 +284,9 @@ func (t *TaskConfig) Init(
 			log.Error("not found source instance, please correct the config", zap.String("instance", si))
 			return errors.Errorf("not found source instance, please correct the config. instance is `%s`", si)
 		}
+		if err := ds.ValidateDatabaseType(); err != nil {
+			return errors.Annotatef(err, "invalid source instance %s", si)
+		}
 		// try to register tls
 		if err := ds.RegisterTLS(); err != nil {
 			return errors.Trace(err)
@@ -252,6 +299,12 @@ func (t *TaskConfig) Init(
 	if !ok {
 		log.Error("not found target instance, please correct the config", zap.String("instance", t.Target))
 		return errors.Errorf("not found target instance, please correct the config. instance is `%s`", t.Target)
+	}
+	if err := ts.ValidateDatabaseType(); err != nil {
+		return errors.Annotatef(err, "invalid target instance %s", t.Target)
+	}
+	if ts.DatabaseType() == DatabaseTypeDB2 {
+		return errors.Errorf("target instance %s uses db2; db2 is supported only as an upstream source", t.Target)
 	}
 	// try to register tls
 	if err := ts.RegisterTLS(); err != nil {
