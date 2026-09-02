@@ -1,0 +1,39 @@
+# Db2 LUW 11.5 source -> TiDB target (CanonicalV1) example.
+# The source tables must remain unchanged for the complete comparison.
+
+check-thread-count = 4
+export-fix-sql = true
+
+[data-sources.db2_source]
+type = "db2"
+host = "db2.example.internal"
+port = 50000
+database = "SAMPLE"
+schema = "APP"
+user = "sync_diff"
+password = ""
+connect-timeout = "15s"
+# Db2 CLI/ODBC keywords, not MySQL session variables.
+[data-sources.db2_source.connection-params]
+# Security = "SSL"
+# SSLServerCertificate = "/path/to/db2-ca.pem"
+
+[data-sources.tidb_target]
+type = "tidb"
+host = "tidb.example.internal"
+port = 4000
+user = "root"
+password = ""
+session.tidb_opt_prefer_range_scan = "ON"
+
+[task]
+output-dir = "/tmp/sync-diff-db2"
+source-instances = ["db2_source"]
+target-instance = "tidb_target"
+target-check-tables = ["app.orders"]
+
+[table-configs.orders]
+target-tables = ["app.orders"]
+# Required when the table has no primary key or non-null unique key. V1 still
+# verifies it as one stable block until Db2 multi-block validation is added.
+index-fields = ["id"]

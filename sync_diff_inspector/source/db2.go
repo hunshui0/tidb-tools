@@ -64,6 +64,9 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 		if !common.AllTableExist(table.TableLack) {
 			continue
 		}
+		if !utils.IsRangeTrivial(table.Range) {
+			return nil, errors.Errorf("db2 source does not accept legacy SQL range strings for %s.%s; use the structured range checkpoint format", table.Schema, table.Table)
+		}
 		info, err := db2util.ReadTableInfo(ctx, ds.Conn, schema, table.Table)
 		if err != nil {
 			return nil, errors.Trace(err)
