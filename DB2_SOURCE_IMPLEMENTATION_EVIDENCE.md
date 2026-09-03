@@ -75,9 +75,12 @@ Windows-safe checkpoint writes. It does not connect to Db2, TiDB, PD, or etcd.
 | `/tmp/go123/bin/go test ./sync_diff_inspector/canonical ./sync_diff_inspector/db2util ./sync_diff_inspector/chunk ./sync_diff_inspector/checkpoints ./sync_diff_inspector/utils` | Passed |
 | `/tmp/go123/bin/go test ./sync_diff_inspector/source -run 'TestDB2\\|TestDecodeDB2'` | Passed |
 | `/tmp/go123/bin/go test ./sync_diff_inspector/checkpoints -run 'TestSaveChunkWindows\\|TestLoadChunkCorrupt'` | Passed |
-| `/tmp/go123/bin/go test ./sync_diff_inspector/source` | Not clean: pre-existing `TestMysqlRouter` sqlmock expectation mismatch; DB2-targeted tests pass |
+| `/tmp/go123/bin/go test ./sync_diff_inspector/source` | Passed (including DB2-targeted tests) |
 | `/tmp/go123/bin/go test -tags db2cli ./sync_diff_inspector/db2util` | Not verified successfully: this WSL host has no Db2 CLI `sqlcli.h` headers |
-| `GOOS=windows /tmp/go123/bin/go test -run '^$' ./sync_diff_inspector` | Pending host toolchain/native-driver validation |
+| `/tmp/go123/bin/go test ./sync_diff_inspector/...` | Not clean: existing `source/common.TestConnect` expects a local listener at `127.0.0.1:4000`; no DB2/TiDB service was started |
+| `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 /tmp/go123/bin/go build ./sync_diff_inspector` | Passed (ELF binary) |
+| `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 /tmp/go123/bin/go build ./sync_diff_inspector` | Passed (PE32+ binary; execution not attempted in WSL) |
+| `git diff --check c26c52c^..HEAD` | Passed |
 
 The streaming API retains only one row while producing the same digest as the
 batch API. Db2 chunks require a non-null stable key and use `DB2Dialect` for
