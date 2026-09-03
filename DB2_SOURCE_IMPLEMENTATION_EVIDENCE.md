@@ -64,3 +64,24 @@ No Db2 CLI client, Db2 LUW 11.5 server, or TiDB server is available in this
 environment. Therefore no claim is made for a real Db2 connection, catalog
 read, cross-database end-to-end comparison, or repair-SQL acceptance. These
 remain mandatory release-gate validations.
+
+## Continuation verification (feature/db2-source)
+
+This continuation adds streaming CanonicalV1 hashing, Db2 keyset chunking, and
+Windows-safe checkpoint writes. It does not connect to Db2, TiDB, PD, or etcd.
+
+| Command | Result |
+| --- | --- |
+| `/tmp/go123/bin/go test ./sync_diff_inspector/canonical ./sync_diff_inspector/db2util ./sync_diff_inspector/chunk ./sync_diff_inspector/checkpoints ./sync_diff_inspector/utils` | Passed |
+| `/tmp/go123/bin/go test ./sync_diff_inspector/source -run 'TestDB2\\|TestDecodeDB2'` | Passed |
+| `/tmp/go123/bin/go test ./sync_diff_inspector/checkpoints -run 'TestSaveChunkWindows\\|TestLoadChunkCorrupt'` | Passed |
+| `/tmp/go123/bin/go test ./sync_diff_inspector/source` | Not clean: pre-existing `TestMysqlRouter` sqlmock expectation mismatch; DB2-targeted tests pass |
+| `/tmp/go123/bin/go test -tags db2cli ./sync_diff_inspector/db2util` | Not verified successfully: this WSL host has no Db2 CLI `sqlcli.h` headers |
+| `GOOS=windows /tmp/go123/bin/go test -run '^$' ./sync_diff_inspector` | Pending host toolchain/native-driver validation |
+
+The streaming API retains only one row while producing the same digest as the
+batch API. Db2 chunks require a non-null stable key and use `DB2Dialect` for
+all range SQL; no MySQL WHERE string is sent to Db2. Different source/target
+column names remain unsupported and are rejected by the existing same-name
+mapping contract. Real connection, end-to-end comparison, performance, and
+production checkpoint evidence remain unverified.

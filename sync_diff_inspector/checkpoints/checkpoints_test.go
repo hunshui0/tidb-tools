@@ -17,6 +17,7 @@ import (
 	"context"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -26,6 +27,33 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSaveChunkWindowsSafePathAndOverwrite(t *testing.T) {
+	cp := new(Checkpoint)
+	cp.Init()
+	target := filepath.Join(t.TempDir(), "nested", "checkpoint.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
+	node := &Node{State: SuccessState, ChunkRange: &chunk.Range{Index: &chunk.ChunkID{TableIndex: 0, ChunkIndex: 0, ChunkCnt: 1}, IsFirst: true, IsLast: true}}
+	_, err := cp.SaveChunk(context.Background(), target, node, nil)
+	require.NoError(t, err)
+	_, err = cp.SaveChunk(context.Background(), target, node, nil)
+	require.NoError(t, err)
+	loaded, _, err := cp.LoadChunk(target)
+	require.NoError(t, err)
+	require.Equal(t, node.GetID().Compare(loaded.GetID()), 0)
+	entries, err := os.ReadDir(filepath.Dir(target))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, filepath.Base(target), entries[0].Name())
+}
+
+func TestLoadChunkCorrupt(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "checkpoint.json")
+	require.NoError(t, os.WriteFile(file, []byte("not-json"), 0o600))
+	cp := new(Checkpoint)
+	_, _, err := cp.LoadChunk(file)
+	require.Error(t, err)
+}
 
 func TestSaveChunk(t *testing.T) {
 	checker := new(Checkpoint)

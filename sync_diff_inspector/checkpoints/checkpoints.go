@@ -18,16 +18,15 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/config"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/report"
 
-	"github.com/pingcap/tidb-tools/sync_diff_inspector/chunk"
-	"github.com/siddontang/go/ioutil2"
-
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tidb-tools/sync_diff_inspector/chunk"
 	"go.uber.org/zap"
 )
 
@@ -219,13 +218,60 @@ func (cp *Checkpoint) SaveChunk(ctx context.Context, fileName string, cur *Node,
 		return nil, errors.Trace(err)
 	}
 
-	if err = ioutil2.WriteFileAtomic(fileName, checkpointData, config.LocalFilePerm); err != nil {
+	if err = writeFileAtomic(fileName, checkpointData, config.LocalFilePerm); err != nil {
 		return nil, err
 	}
 	log.Info("save checkpoint",
 		zap.Any("chunk", cur),
 		zap.String("state", cur.GetState()))
 	return cur.GetID(), nil
+}
+
+// writeFileAtomic keeps temporary files beside the destination so replacement
+// remains atomic on the same volume. filepath is required here because
+// checkpoint paths may contain Windows drive letters and backslashes.
+func writeFileAtomic(fileName string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(fileName)
+	base := filepath.Base(fileName)
+	tmp, err := os.CreateTemp(dir, base+".tmp-")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err = tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err = tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err = os.Rename(tmpName, fileName); err == nil {
+		return nil
+	}
+	// Windows does not replace an existing file with Rename. Remove only the
+	// validated destination, then retry; a failed write still cleans its temp.
+	if removeErr := os.Remove(fileName); removeErr != nil && !os.IsNotExist(removeErr) {
+		cleanup()
+		return err
+	}
+	if err = os.Rename(tmpName, fileName); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
 }
 
 // LoadChunk loads chunk info from file `chunk`

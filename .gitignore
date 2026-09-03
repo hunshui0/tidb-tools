@@ -5,3 +5,8 @@
 deps.sh
 .idea/
 sync_diff_inspector/config/output/*
+
+# Machine-local secrets and portable Db2 build/runtime assets.
+sync_diff_inspector/config/config_db2.local.toml
+.local-tools/
+tmp/
