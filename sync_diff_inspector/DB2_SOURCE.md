@@ -59,6 +59,10 @@ The keyset planner and row iterator are covered by sqlmock tests only. Real
 Db2 ordering, collation, NULL behavior, and checkpoint resume still require a
 user-run Db2 LUW validation.
 
+Column mapping is currently same-name (case-insensitive) only. Explicit
+source-to-target column rename configuration is not implemented in this V1;
+tables requiring different names must be renamed or excluded before running.
+
 ## Type matrix
 
 | Db2 LUW type | V1 behavior |
