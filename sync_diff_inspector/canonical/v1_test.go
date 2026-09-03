@@ -2,6 +2,7 @@ package canonical
 
 import (
 	"bytes"
+	"io"
 	"testing"
 	"time"
 
@@ -39,4 +40,22 @@ func TestCanonicalV1LimitsLOBAndFloatBoundaries(t *testing.T) {
 	zeroB, err := EncodeRow([]Column{{Name: "f", Kind: KindFloat}}, []any{float64(-0)})
 	require.NoError(t, err)
 	require.Equal(t, zeroA, zeroB)
+}
+
+func TestDigestRowsStreamMatchesBatch(t *testing.T) {
+	columns := []Column{{Name: "id", Kind: KindInteger}, {Name: "name", Kind: KindString, TrimChar: true}}
+	rows := [][]any{{int64(1), "a  "}, {int64(2), "中文"}, {nil, ""}}
+	batch, err := DigestRows(columns, rows)
+	require.NoError(t, err)
+	i := 0
+	stream, err := DigestRowsStream(columns, func() ([]any, error) {
+		if i == len(rows) {
+			return nil, io.EOF
+		}
+		row := rows[i]
+		i++
+		return row, nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, batch, stream)
 }

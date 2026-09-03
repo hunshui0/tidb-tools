@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"encoding/binary"
+	"io"
 	"time"
 
 	"github.com/pingcap/tidb-tools/pkg/dbutil"
@@ -25,22 +26,22 @@ func (s CanonicalSource) GetCountAndMd5(ctx context.Context, tableRange *splitte
 	defer iterator.Close()
 	table := s.GetTables()[tableRange.GetTableIndex()]
 	columns := canonicalColumns(table.Info.Columns)
-	rows := make([][]any, 0)
-	for {
+	var count int64
+	digest, err := canonical.DigestRowsStream(columns, func() ([]any, error) {
 		row, err := iterator.Next()
 		if err != nil {
-			return &ChecksumInfo{Err: err, Cost: time.Since(started)}
+			return nil, err
 		}
 		if row == nil {
-			break
+			return nil, io.EOF
 		}
-		rows = append(rows, canonicalValues(table.Info.Columns, row))
-	}
-	digest, err := canonical.DigestRows(columns, rows)
+		count++
+		return canonicalValues(table.Info.Columns, row), nil
+	})
 	if err != nil {
 		return &ChecksumInfo{Err: err, Cost: time.Since(started)}
 	}
-	return &ChecksumInfo{Checksum: binary.BigEndian.Uint64(digest[:8]), Digest: digest, Algorithm: canonical.Version, Count: int64(len(rows)), Cost: time.Since(started)}
+	return &ChecksumInfo{Checksum: binary.BigEndian.Uint64(digest[:8]), Digest: digest, Algorithm: canonical.Version, Count: count, Cost: time.Since(started)}
 }
 
 func canonicalValues(columns []*model.ColumnInfo, row map[string]*dbutil.ColumnData) []any {

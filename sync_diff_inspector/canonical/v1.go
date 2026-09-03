@@ -67,10 +67,31 @@ func EncodeRow(columns []Column, values []any) ([]byte, error) {
 }
 
 func DigestRows(columns []Column, rows [][]any) ([32]byte, error) {
+	index := 0
+	return DigestRowsStream(columns, func() ([]any, error) {
+		if index >= len(rows) {
+			return nil, io.EOF
+		}
+		row := rows[index]
+		index++
+		return row, nil
+	})
+}
+
+// DigestRowsStream computes the same digest as DigestRows while retaining only
+// the current row. The callback must return io.EOF when no rows remain.
+func DigestRowsStream(columns []Column, next func() ([]any, error)) ([32]byte, error) {
 	h := sha256.New()
 	h.Write([]byte(Version))
 	h.Write([]byte{0})
-	for _, row := range rows {
+	for {
+		row, err := next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return [32]byte{}, err
+		}
 		encoded, err := EncodeRow(columns, row)
 		if err != nil {
 			return [32]byte{}, err
