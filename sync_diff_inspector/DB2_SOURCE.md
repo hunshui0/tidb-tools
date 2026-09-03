@@ -23,6 +23,18 @@ Use [config_db2.toml](./config/config_db2.toml) as the minimum configuration.
 Db2 unquoted identifiers are normalized to upper case. Quoted identifiers keep
 their case. `database` and `schema` are mandatory for a Db2 source.
 
+On Windows, set `client-code-page = "1208"` under the Db2 data source when
+Chinese or other non-ASCII characters must be compared. The tool validates this
+as a numeric Db2 code page and sets `DB2CODEPAGE` before the first Db2
+connection. This process-level setting applies to the single Db2 source in V1;
+it is not a `connection-params`/DSN keyword.
+
+For Db2 databases whose ordinary `CHAR`, `VARCHAR`, or `CLOB` result bytes are
+GBK, set `source-charset = "gbk"`. The Db2 row iterator converts only those
+text columns to UTF-8 before comparison; binary columns and `GRAPHIC`/
+`VARGRAPHIC` values are left untouched. Do not use this setting for a Db2
+source that already returns UTF-8 bytes.
+
 ## Comparison protocol
 
 Db2 and TiDB do not compare their server-side hashes. Both endpoints use
@@ -33,12 +45,19 @@ trims trailing spaces for CHAR; preserves binary bytes; and caps LOB values at
 16 MiB per value. A digest with a different algorithm version is never treated
 as equal.
 
-For V1, Db2 tables are scanned as a single stable chunk. A primary key or a
-non-null unique key is preferred; set `index-fields` when no such key exists.
-Legacy string `range` expressions are rejected for a Db2 source, because they
-are MySQL syntax. The new structured range/Dialect package is checkpoint-safe,
-but Db2 multi-chunk planning is intentionally deferred until it has real Db2
-ordering and checkpoint-resume evidence.
+For V1, Db2 tables use keyset chunks ordered by `index-fields`, then primary
+key, then a non-null unique index. `chunk-size` controls the number of rows in
+each chunk. A nullable configured key is rejected because Db2 NULL ordering
+cannot provide a portable, non-overlapping keyset. Tables without a stable key
+must be configured explicitly; the analyzer fails instead of silently using
+unstable OFFSET pagination. Legacy string `range` expressions are rejected for
+a Db2 source because they are MySQL syntax. Bounds are stored as structured,
+typed values and rendered by `DB2Dialect`; the final keyset chunk includes its
+upper endpoint.
+
+The keyset planner and row iterator are covered by sqlmock tests only. Real
+Db2 ordering, collation, NULL behavior, and checkpoint resume still require a
+user-run Db2 LUW validation.
 
 ## Type matrix
 

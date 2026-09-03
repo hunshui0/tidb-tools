@@ -51,6 +51,10 @@ type Bound struct {
 	Column string `json:"column"`
 	Lower  string `json:"lower"`
 	Upper  string `json:"upper"`
+	// Typed values are optional and used by dialects that cannot safely
+	// reconstruct a boundary from text (for example binary Db2 keys).
+	LowerValue any `json:"lower-value,omitempty"`
+	UpperValue any `json:"upper-value,omitempty"`
 
 	HasLower bool `json:"has-lower"`
 	HasUpper bool `json:"has-upper"`
@@ -154,6 +158,10 @@ type Range struct {
 
 	Where string `json:"where"`
 	Args  []any  `json:"args"`
+	// DB2UpperInclusive is used only by the Db2 dialect. It keeps the
+	// database-independent chunk bounds while allowing the final keyset chunk
+	// to include its upper endpoint.
+	DB2UpperInclusive bool `json:"db2-upper-inclusive,omitempty"`
 
 	// IndexColumnNames store column names of index splitting chunks.
 	// It's used to find index name and generate index hint in checksum query.
@@ -426,11 +434,13 @@ func (c *Range) Copy() *Range {
 	newChunk.IndexColumnNames = c.IndexColumnNames
 	for _, bound := range c.Bounds {
 		newChunk.addBound(&Bound{
-			Column:   bound.Column,
-			Lower:    bound.Lower,
-			Upper:    bound.Upper,
-			HasLower: bound.HasLower,
-			HasUpper: bound.HasUpper,
+			Column:     bound.Column,
+			Lower:      bound.Lower,
+			Upper:      bound.Upper,
+			LowerValue: bound.LowerValue,
+			UpperValue: bound.UpperValue,
+			HasLower:   bound.HasLower,
+			HasUpper:   bound.HasUpper,
 		})
 	}
 
@@ -442,16 +452,19 @@ func (c *Range) Clone() *Range {
 	newChunk.IndexColumnNames = c.IndexColumnNames
 	for _, bound := range c.Bounds {
 		newChunk.addBound(&Bound{
-			Column:   bound.Column,
-			Lower:    bound.Lower,
-			Upper:    bound.Upper,
-			HasLower: bound.HasLower,
-			HasUpper: bound.HasUpper,
+			Column:     bound.Column,
+			Lower:      bound.Lower,
+			Upper:      bound.Upper,
+			LowerValue: bound.LowerValue,
+			UpperValue: bound.UpperValue,
+			HasLower:   bound.HasLower,
+			HasUpper:   bound.HasUpper,
 		})
 	}
 	newChunk.Type = c.Type
 	newChunk.Where = c.Where
 	newChunk.Args = c.Args
+	newChunk.DB2UpperInclusive = c.DB2UpperInclusive
 	for i, v := range c.columnOffset {
 		newChunk.columnOffset[i] = v
 	}

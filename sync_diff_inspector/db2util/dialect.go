@@ -117,14 +117,14 @@ func renderRange(d Dialect, r Range) (string, []any, error) {
 func tuplePredicate(d Dialect, columns []string, bounds []Bound, inclusive, lower bool) (string, []any) {
 	parts := make([]string, 0, len(columns))
 	args := make([]any, 0, len(columns)*(len(columns)+1)/2)
-	operator := "<"
-	if lower {
-		operator = ">"
-	}
-	if inclusive {
-		operator += "="
-	}
 	for i := range columns {
+		operator := "<"
+		if lower {
+			operator = ">"
+		}
+		if inclusive && i == len(columns)-1 {
+			operator += "="
+		}
 		prefix := make([]string, 0, i+1)
 		valid := true
 		for j := 0; j < i; j++ {
