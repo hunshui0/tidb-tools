@@ -521,8 +521,14 @@ func TestMysqlRouter(t *testing.T) {
 	mock.ExpectQuery("SELECT COUNT.*").WillReturnRows(countRows)
 	rangeIter, err := mysql.GetRangeIterator(ctx, nil, mysql.GetTableAnalyzer(), 3)
 	require.NoError(t, err)
-	_, err = rangeIter.Next(ctx)
-	require.NoError(t, err)
+	for {
+		var r *splitter.RangeInfo
+		r, err = rangeIter.Next(ctx)
+		require.NoError(t, err)
+		if r == nil {
+			break
+		}
+	}
 	rangeIter.Close()
 
 	rangeIter, err = mysql.GetRangeIterator(ctx, tableCases[0].rangeInfo, mysql.GetTableAnalyzer(), 3)
