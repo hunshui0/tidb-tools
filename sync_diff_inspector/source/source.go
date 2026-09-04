@@ -56,9 +56,9 @@ type ChecksumInfo struct {
 	// Algorithm is empty for legacy MySQL/TiDB server MD5 checksums. Db2 ->
 	// TiDB uses CanonicalV1 on both sides and refuses cross-algorithm equality.
 	Algorithm string
-	Count    int64
-	Err      error
-	Cost     time.Duration
+	Count     int64
+	Err       error
+	Cost      time.Duration
 }
 
 // RowDataIterator represents the row data in source.
@@ -119,6 +119,22 @@ type Source interface {
 
 	// Close ...
 	Close()
+}
+
+// IsDB2Source reports whether s ultimately reads from Db2. CanonicalSource
+// deliberately wraps the concrete source, so callers must not rely on a
+// direct *DB2Source type assertion when selecting the chunk planner.
+func IsDB2Source(s Source) bool {
+	switch typed := s.(type) {
+	case *DB2Source:
+		return true
+	case CanonicalSource:
+		return IsDB2Source(typed.Source)
+	case *CanonicalSource:
+		return IsDB2Source(typed.Source)
+	default:
+		return false
+	}
 }
 
 func NewSources(ctx context.Context, cfg *config.Config) (downstream Source, upstream Source, err error) {

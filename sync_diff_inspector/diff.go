@@ -377,15 +377,24 @@ func (df *Diff) startGCKeeperForTiDB(ctx context.Context, db *sql.DB, snap strin
 // pickSource pick one proper source to do some work. e.g. generate chunks
 func (df *Diff) pickSource(ctx context.Context) source.Source {
 	workSource := df.downstream
-	if ok, _ := dbutil.IsTiDB(ctx, df.upstream.GetDB()); ok {
-		log.Info("The upstream is TiDB. pick it as work source candidate")
-		df.startGCKeeperForTiDB(ctx, df.upstream.GetDB(), df.upstream.GetSnapshot())
-		workSource = df.upstream
+	upstreamIsDB2 := source.IsDB2Source(df.upstream)
+	if !upstreamIsDB2 {
+		if ok, _ := dbutil.IsTiDB(ctx, df.upstream.GetDB()); ok {
+			log.Info("The upstream is TiDB. pick it as work source candidate")
+			df.startGCKeeperForTiDB(ctx, df.upstream.GetDB(), df.upstream.GetSnapshot())
+			workSource = df.upstream
+		}
 	}
 	if ok, _ := dbutil.IsTiDB(ctx, df.downstream.GetDB()); ok {
 		log.Info("The downstream is TiDB. pick it as work source first")
 		df.startGCKeeperForTiDB(ctx, df.downstream.GetDB(), df.downstream.GetSnapshot())
 		workSource = df.downstream
+	}
+	if upstreamIsDB2 {
+		// Db2 keyset chunks carry typed, dialect-neutral boundaries. TiDB's
+		// bucket/random splitters do not, so they cannot plan Db2 reads.
+		log.Info("The upstream is Db2. pick it as work source for keyset chunks")
+		workSource = df.upstream
 	}
 	return workSource
 }

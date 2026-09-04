@@ -27,7 +27,9 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb-tools/pkg/dbutil"
 	"github.com/pingcap/tidb-tools/pkg/filter"
+	"github.com/pingcap/tidb-tools/sync_diff_inspector/chunk"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/config"
+	"github.com/pingcap/tidb-tools/sync_diff_inspector/db2util"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/source/common"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/splitter"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/utils"
@@ -215,7 +217,7 @@ func (s *TiDBSource) GenerateFixSQL(t DMLType, upstreamData, downstreamData map[
 }
 
 func (s *TiDBSource) GetRowsIterator(ctx context.Context, tableRange *splitter.RangeInfo) (RowDataIterator, error) {
-	chunk := tableRange.GetChunk()
+	chunkRange := tableRange.GetChunk()
 
 	table := s.tableDiffs[tableRange.GetTableIndex()]
 	sourceSchema, sourceTable := s.GetSourceTable(tableRange)
@@ -226,16 +228,31 @@ func (s *TiDBSource) GetRowsIterator(ctx context.Context, tableRange *splitter.R
 		orderFields = strings.Join(table.OrderKeyColumns, ",")
 	}
 	rowsQuery, _ := utils.GetTableRowsQueryFormatWithOrder(sourceSchema, sourceTable, table.Info, table.Collation, orderFields)
-	query := fmt.Sprintf(rowsQuery, chunk.Where)
+	where, args, err := tiDBRangeFromChunk(chunkRange)
+	if err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf(rowsQuery, where)
 
-	log.Debug("select data", zap.String("sql", query), zap.Reflect("args", chunk.Args))
-	rows, err := s.dbConn.QueryContext(ctx, query, chunk.Args...)
+	log.Debug("select data", zap.String("sql", query), zap.Reflect("args", args))
+	rows, err := s.dbConn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return &TiDBRowsIterator{
 		rows,
 	}, nil
+}
+
+func tiDBRangeFromChunk(r *chunk.Range) (string, []any, error) {
+	if len(r.Bounds) == 0 {
+		where := strings.TrimSpace(r.Where)
+		if where == "" {
+			where = "TRUE"
+		}
+		return where, r.Args, nil
+	}
+	return (db2util.MySQLDialect{}).RenderRange(db2RangeFromChunk(r, nil))
 }
 
 func (s *TiDBSource) GetDB() *sql.DB {

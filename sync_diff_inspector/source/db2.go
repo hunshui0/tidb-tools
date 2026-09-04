@@ -435,10 +435,15 @@ func (s *DB2Source) GetRowsIterator(ctx context.Context, r *splitter.RangeInfo) 
 		order = append(order, db2util.QuoteIdentifier(s.sourceColumns[r.GetTableIndex()][column.Name.O]))
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(columns, ", "), db2util.QualifiedTable(schema, sourceTable))
-	structured := db2RangeFromChunk(r.GetChunk(), s.sourceColumns[r.GetTableIndex()])
-	where, args, err := (db2util.DB2Dialect{}).RenderRange(structured)
-	if err != nil {
-		return nil, err
+	var where string
+	var args []any
+	if len(r.GetChunk().Bounds) > 0 {
+		structured := db2RangeFromChunk(r.GetChunk(), s.sourceColumns[r.GetTableIndex()])
+		var err error
+		where, args, err = (db2util.DB2Dialect{}).RenderRange(structured)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if where != "" {
 		query += " WHERE " + where

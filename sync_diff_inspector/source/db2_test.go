@@ -29,6 +29,13 @@ func TestDB2ConnectionBranchExplainsNativeRequirement(t *testing.T) {
 	require.ErrorContains(t, err, "build with -tags db2cli")
 }
 
+func TestIsDB2SourceRecognizesCanonicalWrapper(t *testing.T) {
+	db2Source := &DB2Source{}
+	require.True(t, IsDB2Source(db2Source))
+	require.True(t, IsDB2Source(CanonicalSource{Source: db2Source}))
+	require.True(t, IsDB2Source(&CanonicalSource{Source: db2Source}))
+}
+
 func TestDecodeDB2GBKTextRow(t *testing.T) {
 	gbk, err := simplifiedchinese.GBK.NewEncoder().Bytes([]byte("中文"))
 	require.NoError(t, err)
@@ -271,6 +278,32 @@ func TestDB2RowsIteratorUsesSelectedKey(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("a"), row["NAME"].Data)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDB2RowsIteratorAcceptsUnboundedFullTableChunk(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	id := db2TestKeyColumn("ID", 0, mysql.TypeLonglong)
+	table := db2TestTable(id, 2)
+	source := db2TestSource(db, table, id)
+	rangeInfo := &splitter.RangeInfo{ChunkRange: &chunk.Range{Index: &chunk.ChunkID{TableIndex: 0}, Where: "((TRUE) AND (TRUE))"}}
+	mock.ExpectQuery(`SELECT "ID" AS "ID" FROM "APP"\."T" ORDER BY "ID"`).WillReturnRows(sqlmock.NewRows([]string{"ID"}).AddRow(int64(1)))
+	rows, err := source.GetRowsIterator(context.Background(), rangeInfo)
+	require.NoError(t, err)
+	rows.Close()
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTiDBRangeFromDB2KeysetChunkUsesTypedBounds(t *testing.T) {
+	r := &chunk.Range{Bounds: []*chunk.Bound{
+		{Column: "ID", Lower: "10", Upper: "20", LowerValue: int64(10), UpperValue: int64(20), HasLower: true, HasUpper: true},
+		{Column: "CODE", Lower: "a", Upper: "z", LowerValue: "a", UpperValue: "z", HasLower: true, HasUpper: true},
+	}}
+	where, args, err := tiDBRangeFromChunk(r)
+	require.NoError(t, err)
+	require.Equal(t, "((`ID` > ?) OR (`ID` = ? AND `CODE` > ?)) AND ((`ID` < ?) OR (`ID` = ? AND `CODE` <= ?))", where)
+	require.Equal(t, []any{int64(10), int64(10), "a", int64(20), int64(20), "z"}, args)
 }
 
 func db2TestKeyColumn(name string, offset int, typ byte) *model.ColumnInfo {
