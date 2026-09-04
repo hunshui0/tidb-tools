@@ -16,6 +16,7 @@ package common
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/pingcap/failpoint"
@@ -25,6 +26,9 @@ import (
 )
 
 func TestConnect(t *testing.T) {
+	if os.Getenv("SYNC_DIFF_RUN_INTEGRATION") != "1" {
+		t.Skip("integration test disabled; set SYNC_DIFF_RUN_INTEGRATION=1 to run against MySQL/TiDB")
+	}
 	plainPsw := "dQAUoDiyb1ucWZk7"
 
 	require.NoError(t, failpoint.Enable(
