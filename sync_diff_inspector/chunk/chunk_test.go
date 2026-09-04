@@ -14,11 +14,40 @@
 package chunk
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/stretchr/testify/require"
 )
+
+func TestBoundJSONPreservesDb2CheckpointValueTypes(t *testing.T) {
+	original := &Bound{
+		Column: "ID", Lower: "", Upper: "9223372036854775807", HasUpper: true,
+		UpperValue: int64(9223372036854775807),
+	}
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+	var restored Bound
+	require.NoError(t, json.Unmarshal(data, &restored))
+	require.IsType(t, int64(0), restored.UpperValue)
+	require.Equal(t, int64(9223372036854775807), restored.UpperValue)
+
+	original = &Bound{Column: "BIN", Upper: "", HasUpper: true, UpperValue: []byte{0x00, 0xff, 0x7f}}
+	data, err = json.Marshal(original)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &restored))
+	require.Equal(t, []byte{0x00, 0xff, 0x7f}, restored.UpperValue)
+
+	stamp := time.Date(2026, 9, 4, 2, 3, 4, 123456789, time.FixedZone("CST", 8*60*60))
+	original = &Bound{Column: "TS", Upper: "", HasUpper: true, UpperValue: stamp}
+	data, err = json.Marshal(original)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &restored))
+	require.IsType(t, time.Time{}, restored.UpperValue)
+	require.Equal(t, stamp.UTC(), restored.UpperValue)
+}
 
 func TestChunkUpdate(t *testing.T) {
 	chunk := &Range{
