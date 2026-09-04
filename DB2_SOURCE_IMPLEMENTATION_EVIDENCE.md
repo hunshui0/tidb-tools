@@ -104,3 +104,21 @@ column names remain unsupported and are rejected by the existing same-name
 mapping contract. The specific user-verified single-column keyset run is
 recorded above; composite-key execution, checkpoint interruption/recovery,
 repair SQL acceptance, performance, and production evidence remain unverified.
+
+## No-common-unique-key checksum-only continuation
+
+This implementation adds an opt-in Db2 upstream mode,
+`no-unique-key-mode = "checksum-only"`. The default remains `error`.
+Offline unit/sqlmock coverage verifies configuration validation, selection of a
+later shared unique candidate, a single unbounded chunk, no `ORDER BY` on Db2
+or TiDB, and the `CanonicalMultisetV1` protocol's order independence and
+duplicate sensitivity. A mismatch is reported without row details, row change
+counts, binary search, or repair SQL generation.
+
+No database was connected and no `-Action Run` command was used for this
+continuation. This is not real DB2/TiDB evidence. In particular, real no-key
+checksums, complete-table scan performance, interrupted full-table restart,
+composite-key execution, repair-SQL execution acceptance, and production
+readiness remain unverified. The Windows native build recorded above predates
+this change; it must be rerun by the user in PowerShell before being treated as
+evidence for this version.

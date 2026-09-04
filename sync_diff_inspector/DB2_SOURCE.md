@@ -71,6 +71,31 @@ Column mapping is currently same-name (case-insensitive) only. Explicit
 source-to-target column rename configuration is not implemented in this V1;
 tables requiring different names must be renamed or excluded before running.
 
+## Tables without a common unique key
+
+The default `no-unique-key-mode` is `error`: a Db2 table must have a non-null
+PRIMARY KEY or UNIQUE KEY with the same ordered columns on TiDB. Automatic
+selection checks all TiDB candidates (primary keys first, then unique keys),
+and uses the first candidate declared unique and non-null on both endpoints.
+Explicit `index-fields` remains strict: a missing, nullable, or non-common
+unique key is an error even when fallback is enabled.
+
+Set `no-unique-key-mode = "checksum-only"` only for a table without a common
+unique key. Such a table is compared as one full-table, streaming chunk with
+no `ORDER BY` on either endpoint. It uses `CanonicalMultisetV1`: each row uses
+the existing typed `CanonicalV1` encoding, then two domain-separated SHA-256
+row hashes are accumulated modulo 2^256 with the row count. The final SHA-256
+includes the version, count, and both sums. This is O(1) extra memory,
+order-independent, and duplicate-sensitive. It is a low-collision-probability
+multiset checksum, not a mathematical proof of no collision.
+
+When an unordered checksum differs, the report says the row change counts are
+unknown and logs that row details are unavailable. The tool does not run
+binary search or row comparison and does not generate TiDB repair SQL for that
+table, even if `export-fix-sql` is enabled. An interrupted checksum-only scan
+restarts the whole table; it has no row-level checkpoint resume. Large tables
+therefore require a complete scan on both endpoints on every attempt.
+
 ## Type matrix
 
 | Db2 LUW type | V1 behavior |
@@ -100,3 +125,7 @@ are out of scope. Keyset multi-chunk execution is implemented and has one
 user-verified single-column run; checkpoint recovery, repair-SQL execution
 acceptance, composite-key real execution, performance, and production readiness
 remain unverified.
+
+`checksum-only` behavior has offline unit/sqlmock coverage only. A real Db2
+and TiDB run for no-key tables, real restart behavior, performance, and
+production readiness remain unverified and must be performed by the user.

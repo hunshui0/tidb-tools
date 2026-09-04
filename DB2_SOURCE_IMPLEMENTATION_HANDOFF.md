@@ -59,6 +59,9 @@ DB2Source 生产验收。复合键、更多 Db2 类型边界、checkpoint 中断
 - DB2 → TiDB 的分块、摘要比较、差异行定位和 TiDB 修复 SQL 导出。
 - 配置示例、单元测试、离线契约测试及真实 DB2/TiDB 验收说明。
 - 原有 MySQL/TiDB 路径的回归测试。
+- 对没有两端共同非空 PRIMARY/UNIQUE KEY 的 Db2 表，可显式配置
+  `no-unique-key-mode = "checksum-only"`。该模式只做整表、无排序、流式
+  `CanonicalMultisetV1` 判等；不定位差异、不生成修复 SQL，且中断后从表头重扫。
 
 ### 不包含
 

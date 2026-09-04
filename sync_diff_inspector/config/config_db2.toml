@@ -19,6 +19,9 @@ client-code-page = "1208"
 # Decode Db2 CHAR/VARCHAR/CLOB result bytes before comparison. Keep this unset
 # when Db2 already returns UTF-8 bytes.
 source-charset = "gbk"
+# Default is "error". This explicit fallback is safe only when a table has no
+# common non-null PRIMARY/UNIQUE key on Db2 and TiDB.
+no-unique-key-mode = "checksum-only"
 # Db2 CLI/ODBC keywords, not MySQL session variables.
 [data-sources.db2_source.connection-params]
 # Security = "SSL"
