@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -81,6 +82,17 @@ func Connect(ctx context.Context, cfg *config.DataSource, maxOpen int) (*sql.DB,
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	clientCodePage, err := validateClientCodePage(cfg.ClientCodePage)
+	if err != nil {
+		return nil, err
+	}
+	if clientCodePage != "" {
+		// Db2 CLI reads this process-level setting when it establishes the
+		// connection. It must be configured before sql.Open/Ping.
+		if err := os.Setenv("DB2CODEPAGE", clientCodePage); err != nil {
+			return nil, errors.Annotate(err, "set db2 client code page")
+		}
+	}
 	if maxOpen < 1 {
 		maxOpen = 1
 	}
@@ -111,6 +123,18 @@ func Connect(ctx context.Context, cfg *config.DataSource, maxOpen int) (*sql.DB,
 		return nil, errors.Annotate(ClassifyError(err), "initialize db2 read-only isolation")
 	}
 	return db, nil
+}
+
+func validateClientCodePage(raw string) (string, error) {
+	codePage := strings.TrimSpace(raw)
+	if codePage == "" {
+		return "", nil
+	}
+	value, err := strconv.ParseUint(codePage, 10, 32)
+	if err != nil || value == 0 {
+		return "", errors.Errorf("invalid db2 client-code-page %q; use a positive numeric Db2 code page such as 1208", raw)
+	}
+	return strconv.FormatUint(value, 10), nil
 }
 
 // NormalizeIdentifier applies Db2's unquoted-identifier rule. Quoted names

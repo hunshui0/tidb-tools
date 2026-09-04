@@ -660,8 +660,11 @@ func (df *Diff) compareRows(ctx context.Context, rangeInfo *splitter.RangeInfo, 
 	var lastUpstreamData, lastDownstreamData map[string]*dbutil.ColumnData
 	equal := true
 
-	tableInfo := df.workSource.GetTables()[rangeInfo.GetTableIndex()].Info
-	orderKeyCols := dbutil.SelectUniqueOrderKey(tableInfo)
+	tableDiff := df.workSource.GetTables()[rangeInfo.GetTableIndex()]
+	tableInfo := tableDiff.Info
+	// DB2 stores its validated stable key in the runtime-only table state.
+	// MySQL/TiDB tables without that state preserve the historical selection.
+	orderKeyCols := tableDiff.GetOrderKeyColumns()
 	for {
 		if lastUpstreamData == nil {
 			lastUpstreamData, err = upstreamRowsIterator.Next()
@@ -766,7 +769,13 @@ func (df *Diff) compareRows(ctx context.Context, rangeInfo *splitter.RangeInfo, 
 			lastDownstreamData = nil
 		}
 
-		dml.sqls = append(dml.sqls, sql)
+		// With repair SQL export disabled, comparison still needs to record the
+		// differing row counts but must not enqueue an empty SQL statement. An
+		// empty entry otherwise causes writeSQLs to create a fix file and collide
+		// with a previous run's file for the same chunk.
+		if df.exportFixSQL {
+			dml.sqls = append(dml.sqls, sql)
+		}
 	}
 	dml.rowAdd = rowsAdd
 	dml.rowDelete = rowsDelete

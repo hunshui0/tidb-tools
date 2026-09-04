@@ -113,18 +113,20 @@ type Security struct {
 type DataSource struct {
 	// Type is optional for backwards compatibility. An empty value preserves the
 	// historical MySQL/TiDB auto-detection path.
-	Type            string             `toml:"type" json:"type,omitempty"`
-	Host            string             `toml:"host" json:"host"`
-	Port            int                `toml:"port" json:"port"`
-	Database        string             `toml:"database" json:"database,omitempty"`
-	Schema          string             `toml:"schema" json:"schema,omitempty"`
-	ConnectTimeout  string             `toml:"connect-timeout" json:"connect-timeout,omitempty"`
-	ConnectionParams map[string]string `toml:"connection-params" json:"connection-params,omitempty"`
-	User            string             `toml:"user" json:"user"`
-	Password        utils.SecretString `toml:"password" json:"password"`
-	SqlMode         string             `toml:"sql-mode" json:"sql-mode"`
-	Snapshot        string             `toml:"snapshot" json:"snapshot"`
-	SQLHintUseIndex string             `toml:"sql-hint-use-index" json:"sql-hint-use-index"`
+	Type             string             `toml:"type" json:"type,omitempty"`
+	Host             string             `toml:"host" json:"host"`
+	Port             int                `toml:"port" json:"port"`
+	Database         string             `toml:"database" json:"database,omitempty"`
+	Schema           string             `toml:"schema" json:"schema,omitempty"`
+	ConnectTimeout   string             `toml:"connect-timeout" json:"connect-timeout,omitempty"`
+	ClientCodePage   string             `toml:"client-code-page" json:"client-code-page,omitempty"`
+	SourceCharset    string             `toml:"source-charset" json:"source-charset,omitempty"`
+	ConnectionParams map[string]string  `toml:"connection-params" json:"connection-params,omitempty"`
+	User             string             `toml:"user" json:"user"`
+	Password         utils.SecretString `toml:"password" json:"password"`
+	SqlMode          string             `toml:"sql-mode" json:"sql-mode"`
+	Snapshot         string             `toml:"snapshot" json:"snapshot"`
+	SQLHintUseIndex  string             `toml:"sql-hint-use-index" json:"sql-hint-use-index"`
 
 	Security *Security `toml:"security" json:"security"`
 

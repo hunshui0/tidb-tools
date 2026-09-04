@@ -36,6 +36,17 @@ func TestIdentifiersAndErrorCategories(t *testing.T) {
 	require.ErrorContains(t, ClassifyError(assertError("SQL0204N")), "object not found")
 }
 
+func TestValidateClientCodePage(t *testing.T) {
+	codePage, err := validateClientCodePage(" 1208 ")
+	require.NoError(t, err)
+	require.Equal(t, "1208", codePage)
+
+	_, err = validateClientCodePage("utf8")
+	require.ErrorContains(t, err, "positive numeric Db2 code page")
+	_, err = validateClientCodePage("0")
+	require.ErrorContains(t, err, "positive numeric Db2 code page")
+}
+
 type assertError string
 
 func (e assertError) Error() string { return string(e) }

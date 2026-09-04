@@ -13,6 +13,12 @@ schema = "APP"
 user = "sync_diff"
 password = ""
 connect-timeout = "15s"
+# Windows Db2 CLI: set to 1208 to request UTF-8 data from Db2. This is a
+# process-level CLI setting, not a connection-params entry.
+client-code-page = "1208"
+# Decode Db2 CHAR/VARCHAR/CLOB result bytes before comparison. Keep this unset
+# when Db2 already returns UTF-8 bytes.
+source-charset = "gbk"
 # Db2 CLI/ODBC keywords, not MySQL session variables.
 [data-sources.db2_source.connection-params]
 # Security = "SSL"

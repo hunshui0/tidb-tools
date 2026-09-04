@@ -105,11 +105,15 @@ func renderRange(d Dialect, r Range) (string, []any, error) {
 	args := make([]any, 0, 2*len(r.Columns)*len(r.Columns))
 	if len(r.Lower) > 0 {
 		clause, values := tuplePredicate(d, r.Columns, r.Lower, r.LowerInclusive, true)
-		clauses, args = append(clauses, clause), append(args, values...)
+		if clause != "" {
+			clauses, args = append(clauses, clause), append(args, values...)
+		}
 	}
 	if len(r.Upper) > 0 {
 		clause, values := tuplePredicate(d, r.Columns, r.Upper, r.UpperInclusive, false)
-		clauses, args = append(clauses, clause), append(args, values...)
+		if clause != "" {
+			clauses, args = append(clauses, clause), append(args, values...)
+		}
 	}
 	return strings.Join(clauses, " AND "), args, nil
 }
