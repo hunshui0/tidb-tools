@@ -14,10 +14,13 @@
 package chunk
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
@@ -58,6 +61,179 @@ type Bound struct {
 
 	HasLower bool `json:"has-lower"`
 	HasUpper bool `json:"has-upper"`
+}
+
+// MarshalJSON preserves the concrete type of dialect-specific bound values.
+// Checkpoints must not turn BIGINT into float64 or binary keys into strings.
+func (b Bound) MarshalJSON() ([]byte, error) {
+	type wireBound struct {
+		Column         string `json:"column"`
+		Lower          string `json:"lower"`
+		Upper          string `json:"upper"`
+		LowerValue     any    `json:"lower-value,omitempty"`
+		UpperValue     any    `json:"upper-value,omitempty"`
+		LowerValueType string `json:"lower-value-type,omitempty"`
+		UpperValueType string `json:"upper-value-type,omitempty"`
+		HasLower       bool   `json:"has-lower"`
+		HasUpper       bool   `json:"has-upper"`
+	}
+	lower, lowerType, err := marshalBoundValue(b.LowerValue)
+	if err != nil {
+		return nil, err
+	}
+	upper, upperType, err := marshalBoundValue(b.UpperValue)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(wireBound{b.Column, b.Lower, b.Upper, lower, upper, lowerType, upperType, b.HasLower, b.HasUpper})
+}
+
+func (b *Bound) UnmarshalJSON(data []byte) error {
+	type wireBound struct {
+		Column         string          `json:"column"`
+		Lower          string          `json:"lower"`
+		Upper          string          `json:"upper"`
+		LowerValue     json.RawMessage `json:"lower-value"`
+		UpperValue     json.RawMessage `json:"upper-value"`
+		LowerValueType string          `json:"lower-value-type"`
+		UpperValueType string          `json:"upper-value-type"`
+		HasLower       bool            `json:"has-lower"`
+		HasUpper       bool            `json:"has-upper"`
+	}
+	var w wireBound
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	b.Column, b.Lower, b.Upper, b.HasLower, b.HasUpper = w.Column, w.Lower, w.Upper, w.HasLower, w.HasUpper
+	b.LowerValue, b.UpperValue = nil, nil
+	var err error
+	if len(w.LowerValue) > 0 {
+		b.LowerValue, err = unmarshalBoundValue(w.LowerValue, w.LowerValueType)
+		if err != nil {
+			return err
+		}
+	}
+	if len(w.UpperValue) > 0 {
+		b.UpperValue, err = unmarshalBoundValue(w.UpperValue, w.UpperValueType)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func marshalBoundValue(value any) (any, string, error) {
+	if value == nil {
+		return nil, "", nil
+	}
+	switch typed := value.(type) {
+	case []byte:
+		return base64.StdEncoding.EncodeToString(typed), "bytes", nil
+	case int:
+		return typed, "int", nil
+	case int8:
+		return typed, "int8", nil
+	case int16:
+		return typed, "int16", nil
+	case int32:
+		return typed, "int32", nil
+	case int64:
+		return typed, "int64", nil
+	case uint:
+		return typed, "uint", nil
+	case uint8:
+		return typed, "uint8", nil
+	case uint16:
+		return typed, "uint16", nil
+	case uint32:
+		return typed, "uint32", nil
+	case uint64:
+		return typed, "uint64", nil
+	case float32:
+		return typed, "float32", nil
+	case float64:
+		return typed, "float64", nil
+	case string:
+		return typed, "string", nil
+	case bool:
+		return typed, "bool", nil
+	case time.Time:
+		return typed.UTC().Format(time.RFC3339Nano), "time", nil
+	case json.Number:
+		return typed.String(), "json-number", nil
+	default:
+		return nil, "", fmt.Errorf("unsupported checkpoint bound type %T", value)
+	}
+}
+
+func unmarshalBoundValue(raw json.RawMessage, typ string) (any, error) {
+	if typ == "" {
+		return decodeLegacyBoundValue(raw)
+	}
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	if typ == "bytes" {
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("invalid bytes checkpoint bound")
+		}
+		return base64.StdEncoding.DecodeString(text)
+	}
+	if typ == "time" {
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("invalid time checkpoint bound")
+		}
+		return time.Parse(time.RFC3339Nano, text)
+	}
+	if typ == "string" {
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("invalid string checkpoint bound")
+		}
+		return text, nil
+	}
+	if typ == "bool" {
+		boolean, ok := value.(bool)
+		if !ok {
+			return nil, fmt.Errorf("invalid bool checkpoint bound")
+		}
+		return boolean, nil
+	}
+	if typ == "json-number" {
+		return json.Number(fmt.Sprint(value)), nil
+	}
+	number, ok := value.(json.Number)
+	if strings.HasPrefix(typ, "int") || strings.HasPrefix(typ, "uint") {
+		if !ok {
+			return nil, fmt.Errorf("invalid numeric checkpoint bound")
+		}
+		if strings.HasPrefix(typ, "uint") {
+			return strconv.ParseUint(number.String(), 10, 64)
+		}
+		return strconv.ParseInt(number.String(), 10, 64)
+	}
+	if strings.HasPrefix(typ, "float") {
+		if !ok {
+			return nil, fmt.Errorf("invalid numeric checkpoint bound")
+		}
+		return strconv.ParseFloat(number.String(), 64)
+	}
+	return value, nil
+}
+
+func decodeLegacyBoundValue(raw json.RawMessage) (any, error) {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 // ChunkID is to identify the sequence of chunks

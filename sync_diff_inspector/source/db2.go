@@ -27,28 +27,36 @@ type DB2Source struct {
 	dbConn        *sql.DB
 	schema        string
 	sourceColumns map[int]map[string]string
+	orderKeys     map[int][]*model.ColumnInfo
 	textDecoder   *encoding.Decoder
 }
 
 type DB2TableAnalyzer struct{ source *DB2Source }
 
-func (a DB2TableAnalyzer) AnalyzeSplitter(_ context.Context, table *common.TableDiff, start *splitter.RangeInfo) (splitter.ChunkIterator, error) {
+func (a DB2TableAnalyzer) AnalyzeSplitter(ctx context.Context, table *common.TableDiff, start *splitter.RangeInfo) (splitter.ChunkIterator, error) {
 	keys, err := a.source.orderColumns(table)
 	if err != nil {
 		return nil, err
 	}
-	return newDB2KeysetIterator(a.source, table, keys, start), nil
+	return newDB2KeysetIteratorWithContext(ctx, a.source, table, keys, start), nil
 }
 
 func (s *DB2Source) orderColumns(table *common.TableDiff) ([]*model.ColumnInfo, error) {
 	var columns []*model.ColumnInfo
 	if fields := strings.TrimSpace(table.Fields); fields != "" {
+		seen := make(map[string]struct{})
 		for _, field := range strings.Split(fields, ",") {
 			field = strings.TrimSpace(field)
 			if field == "" {
 				continue
 			}
-			column := dbutil.FindColumnByName(table.Info.Columns, strings.Trim(field, "`\" "))
+			name := strings.Trim(field, "`\" ")
+			key := strings.ToLower(name)
+			if _, ok := seen[key]; ok {
+				return nil, errors.Errorf("db2 chunk key column %q is duplicated", field)
+			}
+			seen[key] = struct{}{}
+			column := dbutil.FindColumnByName(table.Info.Columns, name)
 			if column == nil {
 				return nil, errors.Errorf("db2 chunk key column %q does not exist in %s.%s", field, table.Schema, table.Table)
 			}
@@ -57,28 +65,37 @@ func (s *DB2Source) orderColumns(table *common.TableDiff) ([]*model.ColumnInfo, 
 			}
 			columns = append(columns, column)
 		}
+		if len(columns) == 0 {
+			return nil, errors.Errorf("db2 table %s.%s has empty index-fields", table.Schema, table.Table)
+		}
+		if !matchesUniqueIndex(table.Info, columns) {
+			return nil, errors.Errorf("db2 index-fields for %s.%s are not a declared primary or unique key", table.Schema, table.Table)
+		}
 	} else {
-		for _, index := range table.Info.Indices {
-			if !index.Primary && !index.Unique {
-				continue
-			}
-			candidate := make([]*model.ColumnInfo, 0, len(index.Columns))
-			stable := true
-			for _, indexColumn := range index.Columns {
-				if indexColumn.Offset < 0 || indexColumn.Offset >= len(table.Info.Columns) {
-					stable = false
+		indices := append([]*model.IndexInfo(nil), table.Info.Indices...)
+		for pass := 0; pass < 2 && len(columns) == 0; pass++ {
+			for _, index := range indices {
+				if (pass == 0 && !index.Primary) || (pass == 1 && (index.Primary || !index.Unique)) {
+					continue
+				}
+				candidate := make([]*model.ColumnInfo, 0, len(index.Columns))
+				stable := true
+				for _, indexColumn := range index.Columns {
+					if indexColumn.Offset < 0 || indexColumn.Offset >= len(table.Info.Columns) {
+						stable = false
+						break
+					}
+					column := table.Info.Columns[indexColumn.Offset]
+					if !mysql.HasNotNullFlag(column.GetFlag()) {
+						stable = false
+						break
+					}
+					candidate = append(candidate, column)
+				}
+				if stable && len(candidate) > 0 {
+					columns = candidate
 					break
 				}
-				column := table.Info.Columns[indexColumn.Offset]
-				if !index.Primary && !mysql.HasNotNullFlag(column.GetFlag()) {
-					stable = false
-					break
-				}
-				candidate = append(candidate, column)
-			}
-			if stable && len(candidate) > 0 {
-				columns = candidate
-				break
 			}
 		}
 	}
@@ -88,7 +105,32 @@ func (s *DB2Source) orderColumns(table *common.TableDiff) ([]*model.ColumnInfo, 
 	return columns, nil
 }
 
+func matchesUniqueIndex(info *model.TableInfo, columns []*model.ColumnInfo) bool {
+	for _, index := range info.Indices {
+		if !index.Primary && !index.Unique {
+			continue
+		}
+		if len(index.Columns) != len(columns) {
+			continue
+		}
+		matched := true
+		for position, indexColumn := range index.Columns {
+			if indexColumn.Offset < 0 || indexColumn.Offset >= len(info.Columns) ||
+				!strings.EqualFold(info.Columns[indexColumn.Offset].Name.O, columns[position].Name.O) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
 type db2KeysetIterator struct {
+	ctx        context.Context
+	cancel     context.CancelFunc
 	source     *DB2Source
 	table      *common.TableDiff
 	keys       []*model.ColumnInfo
@@ -100,7 +142,12 @@ type db2KeysetIterator struct {
 }
 
 func newDB2KeysetIterator(source *DB2Source, table *common.TableDiff, keys []*model.ColumnInfo, start *splitter.RangeInfo) splitter.ChunkIterator {
-	iterator := &db2KeysetIterator{source: source, table: table, keys: keys, chunkSize: int(table.ChunkSize), chunkIndex: 0}
+	return newDB2KeysetIteratorWithContext(context.Background(), source, table, keys, start)
+}
+
+func newDB2KeysetIteratorWithContext(ctx context.Context, source *DB2Source, table *common.TableDiff, keys []*model.ColumnInfo, start *splitter.RangeInfo) splitter.ChunkIterator {
+	queryCtx, cancel := context.WithCancel(ctx)
+	iterator := &db2KeysetIterator{ctx: queryCtx, cancel: cancel, source: source, table: table, keys: keys, chunkSize: int(table.ChunkSize), chunkIndex: 0}
 	if iterator.chunkSize <= 0 {
 		iterator.chunkSize = 50000
 	}
@@ -138,7 +185,7 @@ func (i *db2KeysetIterator) Next() (*chunk.Range, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := i.source.dbConn.QueryContext(context.Background(), query, args...)
+	rows, err := i.source.dbConn.QueryContext(i.ctx, query, args...)
 	if err != nil {
 		return nil, errors.Annotate(db2util.ClassifyError(err), "fetch db2 chunk boundary")
 	}
@@ -181,7 +228,7 @@ func (i *db2KeysetIterator) Next() (*chunk.Range, error) {
 	if final {
 		i.done = true
 	}
-	result := &chunk.Range{Index: &chunk.ChunkID{ChunkIndex: i.chunkIndex, ChunkCnt: 0}, Type: chunk.Limit, Bounds: bounds, IsFirst: i.chunkIndex == 0, IsLast: final, DB2UpperInclusive: final}
+	result := &chunk.Range{Index: &chunk.ChunkID{ChunkIndex: i.chunkIndex, ChunkCnt: 0}, Type: chunk.Limit, Bounds: bounds, IsFirst: i.chunkIndex == 0, IsLast: final, DB2UpperInclusive: true}
 	i.chunkIndex++
 	return result, nil
 }
@@ -194,7 +241,14 @@ func (i *db2KeysetIterator) tableIndex() int {
 	}
 	return 0
 }
-func (*db2KeysetIterator) Close() {}
+func (i *db2KeysetIterator) Close() {
+	if !i.closed {
+		i.closed = true
+		if i.cancel != nil {
+			i.cancel()
+		}
+	}
+}
 
 func boundValue(bounds []db2util.Bound, index int) any {
 	if index < len(bounds) && bounds[index].Set {
@@ -226,6 +280,7 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 		return nil, err
 	}
 	sourceColumns := make(map[int]map[string]string, len(tableDiffs))
+	orderKeys := make(map[int][]*model.ColumnInfo, len(tableDiffs))
 	for index, table := range tableDiffs {
 		if !common.AllTableExist(table.TableLack) {
 			continue
@@ -250,11 +305,80 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 			}
 		}
 		sourceColumns[index] = mapped
+		if strings.TrimSpace(table.Fields) != "" {
+			sourceKeyColumns, err := columnsByFields(info, table.Fields)
+			if err != nil {
+				return nil, err
+			}
+			if !matchesUniqueIndex(info, sourceKeyColumns) {
+				return nil, errors.Errorf("db2 index-fields for %s.%s are not a declared primary or unique key in Db2", table.Schema, table.Table)
+			}
+		}
+		keys, err := (&DB2Source{sourceColumns: sourceColumns}).orderColumns(table)
+		if err != nil {
+			return nil, err
+		}
+		// Automatic selection is based on the target TableInfo. Verify that the
+		// corresponding Db2 columns form the same declared unique key; otherwise
+		// chunk boundaries would be stable on one endpoint only.
+		sourceKeys := make([]*model.ColumnInfo, 0, len(keys))
+		for _, key := range keys {
+			name := mapped[key.Name.O]
+			column := dbutil.FindColumnByName(info.Columns, name)
+			if column == nil || !mysql.HasNotNullFlag(column.GetFlag()) {
+				return nil, errors.Errorf("db2 ordering key column %s is not non-null in source metadata for %s.%s", key.Name.O, schema, table.Table)
+			}
+			sourceKeys = append(sourceKeys, column)
+		}
+		if !matchesUniqueIndex(info, sourceKeys) {
+			return nil, errors.Errorf("db2 ordering key for %s.%s is not a declared primary or unique key in Db2", schema, table.Table)
+		}
+		orderKeys[index] = keys
+		names := make([]string, 0, len(keys))
+		for _, key := range keys {
+			names = append(names, key.Name.O)
+		}
+		table.OrderKeyColumns = names
 	}
-	return &DB2Source{tableDiffs: tableDiffs, dbConn: ds.Conn, schema: db2util.NormalizeIdentifier(schema), sourceColumns: sourceColumns, textDecoder: textDecoder}, nil
+	return &DB2Source{tableDiffs: tableDiffs, dbConn: ds.Conn, schema: db2util.NormalizeIdentifier(schema), sourceColumns: sourceColumns, orderKeys: orderKeys, textDecoder: textDecoder}, nil
+}
+
+func columnsByFields(info *model.TableInfo, fields string) ([]*model.ColumnInfo, error) {
+	columns := make([]*model.ColumnInfo, 0)
+	seen := make(map[string]struct{})
+	for _, field := range strings.Split(fields, ",") {
+		name := strings.Trim(strings.TrimSpace(field), "`\" ")
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			return nil, errors.Errorf("db2 chunk key column %q is duplicated", name)
+		}
+		seen[key] = struct{}{}
+		column := dbutil.FindColumnByName(info.Columns, name)
+		if column == nil {
+			return nil, errors.Errorf("db2 chunk key column %q does not exist in Db2 metadata", name)
+		}
+		if !mysql.HasNotNullFlag(column.GetFlag()) {
+			return nil, errors.Errorf("db2 chunk key column %q is nullable in Db2 metadata", name)
+		}
+		columns = append(columns, column)
+	}
+	return columns, nil
 }
 
 func (s *DB2Source) GetTableAnalyzer() TableAnalyzer { return DB2TableAnalyzer{source: s} }
+
+// GetOrderKeyColumns exposes the validated key used by Db2 chunking. It is
+// consumed by the row comparator through an optional interface so existing
+// MySQL/TiDB sources retain their historical key selection.
+func (s *DB2Source) GetOrderKeyColumns(tableIndex int) []*model.ColumnInfo {
+	if keys := s.orderKeys[tableIndex]; len(keys) > 0 {
+		return keys
+	}
+	return nil
+}
 func (s *DB2Source) GetRangeIterator(ctx context.Context, r *splitter.RangeInfo, analyzer TableAnalyzer, splitThreadCount int) (RangeIterator, error) {
 	return NewChunksIterator(ctx, analyzer, s.tableDiffs, r, splitThreadCount)
 }
@@ -299,7 +423,15 @@ func (s *DB2Source) GetRowsIterator(ctx context.Context, r *splitter.RangeInfo) 
 		columns = append(columns, db2util.QuoteIdentifier(s.sourceColumns[r.GetTableIndex()][column.Name.O])+" AS "+db2util.QuoteIdentifier(column.Name.O))
 	}
 	order := make([]string, 0)
-	for _, column := range dbutil.SelectUniqueOrderKey(table.Info) {
+	keys := s.orderKeys[r.GetTableIndex()]
+	if len(keys) == 0 {
+		var err error
+		keys, err = s.orderColumns(table)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, column := range keys {
 		order = append(order, db2util.QuoteIdentifier(s.sourceColumns[r.GetTableIndex()][column.Name.O]))
 	}
 	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(columns, ", "), db2util.QualifiedTable(schema, sourceTable))
@@ -327,7 +459,10 @@ func (s *DB2Source) GetRowsIterator(ctx context.Context, r *splitter.RangeInfo) 
 }
 
 func db2RangeFromChunk(r *chunk.Range, sourceColumns map[string]string) db2util.Range {
-	result := db2util.Range{Columns: make([]string, 0, len(r.Bounds)), Lower: make([]db2util.Bound, len(r.Bounds)), Upper: make([]db2util.Bound, len(r.Bounds)), UpperInclusive: r.DB2UpperInclusive}
+	// Db2 keyset chunks use (previousUpper, currentUpper] for every chunk.
+	// Keep this invariant independent of the legacy Range flag so a restored
+	// checkpoint cannot accidentally reopen a gap at an intermediate bound.
+	result := db2util.Range{Columns: make([]string, 0, len(r.Bounds)), Lower: make([]db2util.Bound, len(r.Bounds)), Upper: make([]db2util.Bound, len(r.Bounds)), UpperInclusive: true}
 	for index, bound := range r.Bounds {
 		column := sourceColumns[bound.Column]
 		if column == "" {

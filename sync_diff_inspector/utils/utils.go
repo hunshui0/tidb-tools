@@ -140,7 +140,14 @@ func GetColumnsFromIndex(index *model.IndexInfo, tableInfo *model.TableInfo) []*
 //
 //	e.g. SELECT /*!40001 SQL_NO_CACHE */ `a`, `b` FROM `schema`.`table` WHERE %s ORDER BY `a`.
 func GetTableRowsQueryFormat(schema, table string, tableInfo *model.TableInfo, collation string) (string, []*model.ColumnInfo) {
-	orderByCols := dbutil.SelectUniqueOrderKey(tableInfo)
+	return GetTableRowsQueryFormatWithOrder(schema, table, tableInfo, collation, "")
+}
+
+// GetTableRowsQueryFormatWithOrder is equivalent to GetTableRowsQueryFormat,
+// but allows a source (for example Db2) to provide the exact stable key used
+// for chunking. An empty fields string preserves the historical behavior.
+func GetTableRowsQueryFormatWithOrder(schema, table string, tableInfo *model.TableInfo, collation, fields string) (string, []*model.ColumnInfo) {
+	orderByCols := dbutil.SelectOrderKey(tableInfo, fields)
 
 	columnNames := make([]string, 0, len(tableInfo.Columns))
 	for _, col := range tableInfo.Columns {

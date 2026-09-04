@@ -15,7 +15,9 @@ package common
 
 import (
 	"database/sql"
+	"strings"
 
+	"github.com/pingcap/tidb-tools/pkg/dbutil"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/util/collate"
 )
@@ -66,11 +68,30 @@ type TableDiff struct {
 	Collation string `json:"collation"`
 
 	ChunkSize int64 `json:"chunk-size"`
+	// OrderKeyColumns is runtime-only source state used to keep chunking,
+	// row iteration, and merge ordering on the same logical key.
+	OrderKeyColumns []string `json:"-"`
 
 	// TableLack = 1: the table only exists downstream,
 	// TableLack = -1: the table only exists upstream,
 	// TableLack = 0: the table exists both upstream and downstream.
 	TableLack int `json:"-"`
+}
+
+func (t *TableDiff) GetOrderKeyColumns() []*model.ColumnInfo {
+	if len(t.OrderKeyColumns) == 0 {
+		return dbutil.SelectUniqueOrderKey(t.Info)
+	}
+	result := make([]*model.ColumnInfo, 0, len(t.OrderKeyColumns))
+	for _, name := range t.OrderKeyColumns {
+		for _, column := range t.Info.Columns {
+			if strings.EqualFold(column.Name.O, name) {
+				result = append(result, column)
+				break
+			}
+		}
+	}
+	return result
 }
 
 const (

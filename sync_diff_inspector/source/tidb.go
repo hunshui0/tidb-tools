@@ -17,6 +17,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-semver/semver"
@@ -218,7 +219,13 @@ func (s *TiDBSource) GetRowsIterator(ctx context.Context, tableRange *splitter.R
 
 	table := s.tableDiffs[tableRange.GetTableIndex()]
 	sourceSchema, sourceTable := s.GetSourceTable(tableRange)
-	rowsQuery, _ := utils.GetTableRowsQueryFormat(sourceSchema, sourceTable, table.Info, table.Collation)
+	// Only Db2 sets this runtime-only field. Other source types retain their
+	// historical primary/unique-key ordering even when index-fields is present.
+	orderFields := ""
+	if len(table.OrderKeyColumns) > 0 {
+		orderFields = strings.Join(table.OrderKeyColumns, ",")
+	}
+	rowsQuery, _ := utils.GetTableRowsQueryFormatWithOrder(sourceSchema, sourceTable, table.Info, table.Collation, orderFields)
 	query := fmt.Sprintf(rowsQuery, chunk.Where)
 
 	log.Debug("select data", zap.String("sql", query), zap.Reflect("args", chunk.Args))

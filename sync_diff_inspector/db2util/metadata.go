@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/pingcap/errors"
@@ -92,6 +93,15 @@ func readIndexes(ctx context.Context, db *sql.DB, schema, table string, columns 
 	for _, index := range indexByName {
 		result = append(result, index)
 	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Primary != result[j].Primary {
+			return result[i].Primary
+		}
+		if result[i].Unique != result[j].Unique {
+			return result[i].Unique
+		}
+		return result[i].Name.O < result[j].Name.O
+	})
 	return result, nil
 }
 

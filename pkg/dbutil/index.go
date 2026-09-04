@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/meta/model"
@@ -158,6 +159,28 @@ func FindAllColumnWithIndex(tableInfo *model.TableInfo) []*model.ColumnInfo {
 
 // SelectUniqueOrderKey returns some columns for order by condition.
 func SelectUniqueOrderKey(tbInfo *model.TableInfo) []*model.ColumnInfo {
+	return SelectOrderKey(tbInfo, "")
+}
+
+// SelectOrderKey returns the configured ordering columns when fields is
+// non-empty, falling back to the historical primary/unique-key selection.
+// The configured list is expected to have been validated by the source.
+func SelectOrderKey(tbInfo *model.TableInfo, fields string) []*model.ColumnInfo {
+	if strings.TrimSpace(fields) != "" {
+		result := make([]*model.ColumnInfo, 0)
+		for _, field := range strings.Split(fields, ",") {
+			name := strings.Trim(strings.TrimSpace(field), "`\"")
+			if name == "" {
+				continue
+			}
+			if col := FindColumnByName(tbInfo.Columns, name); col != nil {
+				result = append(result, col)
+			}
+		}
+		if len(result) > 0 {
+			return result
+		}
+	}
 	keyCols := make([]*model.ColumnInfo, 0, 2)
 
 	for _, index := range tbInfo.Indices {
