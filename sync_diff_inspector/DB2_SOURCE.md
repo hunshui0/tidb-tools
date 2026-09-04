@@ -55,9 +55,10 @@ a Db2 source because they are MySQL syntax. Bounds are stored as structured,
 typed values and rendered by `DB2Dialect`; the final keyset chunk includes its
 upper endpoint.
 
-The keyset planner and row iterator are covered by sqlmock tests only. Real
-Db2 ordering, collation, NULL behavior, and checkpoint resume still require a
-user-run Db2 LUW validation.
+The keyset planner and row iterator are implemented and covered by offline
+sqlmock tests. Real Db2 ordering, collation, NULL behavior, multi-chunk
+execution, checkpoint resume, and performance still require a user-run Db2
+LUW validation.
 
 Column mapping is currently same-name (case-insensitive) only. Explicit
 source-to-target column rename configuration is not implemented in this V1;
@@ -87,5 +88,7 @@ end-to-end repair SQL output remain unverified.
 
 Consistency is not a distributed snapshot guarantee. V1 requires the source
 and target tables to be static for the duration of a comparison. Db2 target,
-Db2 sharding, CDC, automatic repair execution, server-side Db2 checksums, and
-Db2 multi-chunk splitting are out of scope.
+Db2 sharding, CDC, automatic repair execution, and server-side Db2 checksums
+are out of scope. Keyset multi-chunk planning is implemented offline, but its
+real-database execution, checkpoint recovery, and performance are not yet
+verified.

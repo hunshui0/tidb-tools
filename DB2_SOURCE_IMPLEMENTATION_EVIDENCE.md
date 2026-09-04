@@ -60,10 +60,16 @@ native-driver build.
 
 ## Real database evidence
 
-No Db2 CLI client, Db2 LUW 11.5 server, or TiDB server is available in this
-environment. Therefore no claim is made for a real Db2 connection, catalog
-read, cross-database end-to-end comparison, or repair-SQL acceptance. These
-remain mandatory release-gate validations.
+The user has previously run the older single-chunk implementation against a
+real Db2 CLI connection and TiDB target. That run verified catalog/structure
+comparison, GBK Chinese conversion, and localization of a real differing
+field. It did not exercise the newer keyset multi-chunk implementation.
+
+The current keyset multi-chunk, typed checkpoint resume, and streaming
+changes have only offline test evidence in this repository. A Windows native
+build of this newer revision has not been re-verified here. No claim is made
+for current-version real connectivity, multi-chunk end-to-end comparison,
+repair-SQL acceptance, performance, or production readiness.
 
 ## Continuation verification (feature/db2-source)
 
@@ -86,5 +92,6 @@ The streaming API retains only one row while producing the same digest as the
 batch API. Db2 chunks require a non-null stable key and use `DB2Dialect` for
 all range SQL; no MySQL WHERE string is sent to Db2. Different source/target
 column names remain unsupported and are rejected by the existing same-name
-mapping contract. Real connection, end-to-end comparison, performance, and
-production checkpoint evidence remain unverified.
+mapping contract. Real current-version connection, multi-chunk comparison,
+checkpoint interruption/recovery, repair SQL, performance, and production
+evidence remain unverified.
