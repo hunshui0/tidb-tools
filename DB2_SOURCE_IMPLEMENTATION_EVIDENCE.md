@@ -73,11 +73,11 @@ evidence for that specific single-column multi-chunk scenario only; it does
 not establish coverage for composite keys or all Db2 types.
 
 The current typed checkpoint resume and streaming changes have offline test
-evidence. The newer revision's Windows native build has not been rerun in this
-WSL session; a prior user-provided Windows build used the portable Db2 CLI and
-`CGO_ENABLED=0`. The Windows go_ibm_db path loads `db2cli64.dll` dynamically,
-so GCC is not required. Real checkpoint interruption/recovery, repair-SQL
-acceptance, performance, and production readiness remain unverified.
+evidence. The user has re-run the newer Windows native build successfully with
+the portable Db2 CLI and `CGO_ENABLED=0`. The Windows go_ibm_db path loads
+`db2cli64.dll` dynamically, so GCC is not required. Real checkpoint
+interruption/recovery, repair-SQL execution acceptance, composite-key execution,
+performance, and production readiness remain unverified.
 
 ## Continuation verification (feature/db2-source)
 
@@ -94,7 +94,7 @@ Windows-safe checkpoint writes. It does not connect to Db2, TiDB, PD, or etcd.
 | `/tmp/go123/bin/go test ./sync_diff_inspector/...` | Not clean: existing `source/common.TestConnect` expects a local listener at `127.0.0.1:4000`; no DB2/TiDB service was started |
 | `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 /tmp/go123/bin/go build ./sync_diff_inspector` | Passed (ELF binary) |
 | `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 /tmp/go123/bin/go build ./sync_diff_inspector` | Passed (PE32+ binary; execution not attempted in WSL) |
-| `scripts/run-db2-local.ps1 -Action Build` (Windows PowerShell) | Historical user-provided pass with portable Db2 CLI and `CGO_ENABLED=0`; not rerun in this WSL session |
+| `scripts/run-db2-local.ps1 -Action Build` (Windows PowerShell) | Passed in the user's Windows environment with the portable Db2 CLI and `CGO_ENABLED=0`; not run from WSL |
 | `git diff --check c26c52c^..HEAD` | Passed |
 
 The streaming API retains only one row while producing the same digest as the

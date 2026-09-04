@@ -60,11 +60,12 @@ typed values and rendered by `DB2Dialect`; the final keyset chunk includes its
 upper endpoint.
 
 The keyset planner and row iterator are implemented and covered by offline
-sqlmock tests. The user has also run the current single-column keyset path
-against Db2 LUW and TiDB with `chunk-size = 2`, processing 108 consecutive
-chunks and locating one real differing field. Composite-key ordering,
-additional Db2 type boundaries, real checkpoint interruption/resume, and
-performance still require separate validation.
+sqlmock tests. Keyset chunks use the progression `(previousUpper, currentUpper]`
+with typed structured bounds. The user has also run the current single-column
+keyset path against Db2 LUW and TiDB with `chunk-size = 2`, processing 108
+consecutive chunks and locating one real differing field. Real composite-key
+execution, checkpoint interruption/resume, and performance still require
+separate validation.
 
 Column mapping is currently same-name (case-insensitive) only. Explicit
 source-to-target column rename configuration is not implemented in this V1;
@@ -96,6 +97,6 @@ Consistency is not a distributed snapshot guarantee. V1 requires the source
 and target tables to be static for the duration of a comparison. Db2 target,
 Db2 sharding, CDC, automatic repair execution, and server-side Db2 checksums
 are out of scope. Keyset multi-chunk execution is implemented and has one
-user-verified single-column run; composite keys, checkpoint recovery,
-repair-SQL acceptance, performance, and production readiness remain
-unverified.
+user-verified single-column run; checkpoint recovery, repair-SQL execution
+acceptance, composite-key real execution, performance, and production readiness
+remain unverified.
