@@ -14,6 +14,10 @@ export LD_LIBRARY_PATH="$IBM_DB_HOME/lib:$LD_LIBRARY_PATH"
 go build -tags db2cli ./sync_diff_inspector
 ```
 
+On Windows, use `scripts/run-db2-local.ps1 -Action Build`. The Windows driver
+loads `db2cli64.dll` dynamically and builds with `CGO_ENABLED=0`, so GCC is not
+required. The portable Db2 CLI remains under `.local-tools/clidriver`.
+
 The selected driver is `github.com/ibmdb/go_ibm_db v0.5.4`. It requires the
 Db2 CLI native client. Building without `-tags db2cli` remains supported for
 offline tests, but starting a Db2 source returns an error explaining the

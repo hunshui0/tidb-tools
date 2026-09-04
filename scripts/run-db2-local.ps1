@@ -21,14 +21,13 @@ $driverRoot = Join-Path $ToolRoot 'clidriver'
 $binaryPath = Join-Path $repoRoot 'bin\sync_diff_inspector.exe'
 
 function Set-PortableEnvironment {
-    # go_ibm_db is a cgo driver; the host Go toolchain and a C compiler are
-    # required. The Db2 CLI itself remains portable and local to ToolRoot.
-    $env:CGO_ENABLED = '1'
+    # On Windows go_ibm_db loads db2cli64.dll through syscall.NewLazyDLL.
+    # Its C-backed implementation is used only on Unix platforms, so forcing
+    # CGO here adds an unnecessary GCC dependency and breaks otherwise valid
+    # Windows builds.
+    $env:CGO_ENABLED = '0'
     $env:IBM_DB_HOME = $driverRoot
-    $env:CGO_CFLAGS = "-I$driverRoot\include"
-    $env:CGO_LDFLAGS = "-L$driverRoot\lib"
     $env:Path = "$driverRoot\bin;$env:Path"
-    $env:LIB = "$driverRoot\lib;$env:LIB"
 }
 
 function Get-Db2Driver {

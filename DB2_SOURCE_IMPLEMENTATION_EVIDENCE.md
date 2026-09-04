@@ -68,11 +68,11 @@ field. It did not exercise the newer keyset multi-chunk implementation.
 
 The current keyset multi-chunk, typed checkpoint resume, and streaming
 changes have only offline test evidence in this repository. A Windows native
-build of this newer revision was attempted with
-`scripts/run-db2-local.ps1 -Action Build` but is blocked because the Windows
-process PATH has no `gcc` executable; the repository has no portable Windows
-compiler to add automatically. No claim is made for current-version real connectivity, multi-chunk end-to-end comparison,
-repair-SQL acceptance, performance, or production readiness.
+build of this newer revision passed with the portable Db2 CLI and
+`CGO_ENABLED=0`. The Windows go_ibm_db path loads `db2cli64.dll` dynamically,
+so GCC is not required. No claim is made for current-version real connectivity,
+multi-chunk end-to-end comparison, repair-SQL acceptance, performance, or
+production readiness.
 
 ## Continuation verification (feature/db2-source)
 
@@ -89,7 +89,7 @@ Windows-safe checkpoint writes. It does not connect to Db2, TiDB, PD, or etcd.
 | `/tmp/go123/bin/go test ./sync_diff_inspector/...` | Not clean: existing `source/common.TestConnect` expects a local listener at `127.0.0.1:4000`; no DB2/TiDB service was started |
 | `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 /tmp/go123/bin/go build ./sync_diff_inspector` | Passed (ELF binary) |
 | `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 /tmp/go123/bin/go build ./sync_diff_inspector` | Passed (PE32+ binary; execution not attempted in WSL) |
-| `scripts/run-db2-local.ps1 -Action Build` (Windows PowerShell) | Blocked: Windows process PATH has no `gcc`; no program was started |
+| `scripts/run-db2-local.ps1 -Action Build` (Windows PowerShell) | Passed with portable Db2 CLI and `CGO_ENABLED=0`; no program was started |
 | `git diff --check c26c52c^..HEAD` | Passed |
 
 The streaming API retains only one row while producing the same digest as the
