@@ -15,6 +15,7 @@ import (
 )
 
 const Version = "CanonicalV1"
+const MultisetVersion = "CanonicalMultisetV1"
 
 type Kind byte
 
@@ -101,6 +102,49 @@ func DigestRowsStream(columns []Column, next func() ([]any, error)) ([32]byte, e
 	var sum [32]byte
 	copy(sum[:], h.Sum(nil))
 	return sum, nil
+}
+
+// DigestRowsMultisetStream computes an order-independent, duplicate-sensitive
+// digest while retaining only the current row and fixed-size accumulator state.
+func DigestRowsMultisetStream(columns []Column, next func() ([]any, error)) ([32]byte, int64, error) {
+	var sum1, sum2 [32]byte
+	var count int64
+	for {
+		row, err := next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return [32]byte{}, count, err
+		}
+		encoded, err := EncodeRow(columns, row)
+		if err != nil {
+			return [32]byte{}, count, err
+		}
+		h1 := sha256.Sum256(append([]byte("CanonicalMultisetV1/1\x00"), encoded...))
+		h2 := sha256.Sum256(append([]byte("CanonicalMultisetV1/2\x00"), encoded...))
+		add256(&sum1, h1)
+		add256(&sum2, h2)
+		count++
+	}
+	var header bytes.Buffer
+	header.WriteString(MultisetVersion)
+	header.WriteByte(0)
+	var countBytes [8]byte
+	binary.BigEndian.PutUint64(countBytes[:], uint64(count))
+	header.Write(countBytes[:])
+	header.Write(sum1[:])
+	header.Write(sum2[:])
+	return sha256.Sum256(header.Bytes()), count, nil
+}
+
+func add256(dst *[32]byte, value [32]byte) {
+	var carry uint16
+	for i := 31; i >= 0; i-- {
+		total := uint16(dst[i]) + uint16(value[i]) + carry
+		dst[i] = byte(total)
+		carry = total >> 8
+	}
 }
 
 func writeLength(out *bytes.Buffer, length uint64) {

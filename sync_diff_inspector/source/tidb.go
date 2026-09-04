@@ -224,10 +224,15 @@ func (s *TiDBSource) GetRowsIterator(ctx context.Context, tableRange *splitter.R
 	// Only Db2 sets this runtime-only field. Other source types retain their
 	// historical primary/unique-key ordering even when index-fields is present.
 	orderFields := ""
-	if len(table.OrderKeyColumns) > 0 {
+	if table.Mode != common.TableDiffModeUnorderedChecksum && len(table.OrderKeyColumns) > 0 {
 		orderFields = strings.Join(table.OrderKeyColumns, ",")
 	}
-	rowsQuery, _ := utils.GetTableRowsQueryFormatWithOrder(sourceSchema, sourceTable, table.Info, table.Collation, orderFields)
+	rowsQuery := ""
+	if table.Mode == common.TableDiffModeUnorderedChecksum {
+		rowsQuery = utils.GetTableRowsQueryFormatWithoutOrder(sourceSchema, sourceTable, table.Info)
+	} else {
+		rowsQuery, _ = utils.GetTableRowsQueryFormatWithOrder(sourceSchema, sourceTable, table.Info, table.Collation, orderFields)
+	}
 	where, args, err := tiDBRangeFromChunk(chunkRange)
 	if err != nil {
 		return nil, err

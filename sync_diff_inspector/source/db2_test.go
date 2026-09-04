@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -139,6 +140,60 @@ func TestDB2AutomaticOrderPrefersPrimaryKey(t *testing.T) {
 	keys, err := (&DB2Source{}).orderColumns(&common.TableDiff{Schema: "APP", Table: "T", Info: info})
 	require.NoError(t, err)
 	require.Equal(t, []string{"ID"}, []string{keys[0].Name.O})
+}
+
+func TestDB2AutomaticKeySelectionContinuesPastNonMatchingCandidate(t *testing.T) {
+	first, second := db2TestKeyColumn("FIRST", 0, mysql.TypeLonglong), db2TestKeyColumn("SECOND", 1, mysql.TypeLonglong)
+	target := &model.TableInfo{Columns: []*model.ColumnInfo{first, second}, Indices: []*model.IndexInfo{
+		{Name: pmodel.NewCIStr("PRIMARY"), Primary: true, Unique: true, Columns: []*model.IndexColumn{{Name: first.Name, Offset: 0}}},
+		{Name: pmodel.NewCIStr("UK_SECOND"), Unique: true, Columns: []*model.IndexColumn{{Name: second.Name, Offset: 1}}},
+	}}
+	sourceFirst, sourceSecond := db2TestKeyColumn("FIRST", 0, mysql.TypeLonglong), db2TestKeyColumn("SECOND", 1, mysql.TypeLonglong)
+	source := &model.TableInfo{Columns: []*model.ColumnInfo{sourceFirst, sourceSecond}, Indices: []*model.IndexInfo{{Name: pmodel.NewCIStr("UK_SECOND"), Unique: true, Columns: []*model.IndexColumn{{Name: sourceSecond.Name, Offset: 1}}}}}
+	keys := findMatchingCandidate(target, source)
+	require.Len(t, keys, 1)
+	require.Equal(t, "SECOND", keys[0].Name.O)
+}
+
+func TestDB2ChecksumOnlyUsesOneUnorderedChunkAndNoOrderBy(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	id := db2TestKeyColumn("ID", 0, mysql.TypeLonglong)
+	table := db2TestTable(id, 2)
+	table.Mode = common.TableDiffModeUnorderedChecksum
+	source := db2TestSource(db, table, id)
+	iter, err := source.GetTableAnalyzer().AnalyzeSplitter(context.Background(), table, &splitter.RangeInfo{ChunkRange: &chunk.Range{Index: &chunk.ChunkID{ChunkIndex: 4}}})
+	require.NoError(t, err)
+	only, err := iter.Next()
+	require.NoError(t, err)
+	require.Empty(t, only.Bounds)
+	require.True(t, only.IsFirst)
+	require.True(t, only.IsLast)
+	require.Equal(t, 1, only.Index.ChunkCnt)
+	next, err := iter.Next()
+	require.NoError(t, err)
+	require.Nil(t, next)
+	mock.ExpectQuery(`SELECT "ID" AS "ID" FROM "APP"\."T"$`).WillReturnRows(sqlmock.NewRows([]string{"ID"}).AddRow(int64(1)))
+	rows, err := source.GetRowsIterator(context.Background(), &splitter.RangeInfo{ChunkRange: only})
+	require.NoError(t, err)
+	rows.Close()
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTiDBChecksumOnlyQueryHasNoOrderBy(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	id := db2TestKeyColumn("ID", 0, mysql.TypeLonglong)
+	table := db2TestTable(id, 2)
+	table.Mode = common.TableDiffModeUnorderedChecksum
+	tidb := &TiDBSource{tableDiffs: []*common.TableDiff{table}, dbConn: db}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT /*!40001 SQL_NO_CACHE */ `ID` FROM `APP`.`T` WHERE TRUE")).WillReturnRows(sqlmock.NewRows([]string{"ID"}).AddRow(int64(1)))
+	rows, err := tidb.GetRowsIterator(context.Background(), &splitter.RangeInfo{ChunkRange: &chunk.Range{Index: &chunk.ChunkID{TableIndex: 0, ChunkCnt: 1}}})
+	require.NoError(t, err)
+	rows.Close()
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestDB2CheckpointResumePreservesTypedBoundary(t *testing.T) {

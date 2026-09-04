@@ -8,6 +8,7 @@ import (
 
 	"github.com/pingcap/tidb-tools/pkg/dbutil"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/canonical"
+	"github.com/pingcap/tidb-tools/sync_diff_inspector/source/common"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/splitter"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -27,6 +28,22 @@ func (s CanonicalSource) GetCountAndMd5(ctx context.Context, tableRange *splitte
 	table := s.GetTables()[tableRange.GetTableIndex()]
 	columns := canonicalColumns(table.Info.Columns)
 	var count int64
+	if table.Mode == common.TableDiffModeUnorderedChecksum {
+		digest, multisetCount, err := canonical.DigestRowsMultisetStream(columns, func() ([]any, error) {
+			row, err := iterator.Next()
+			if err != nil {
+				return nil, err
+			}
+			if row == nil {
+				return nil, io.EOF
+			}
+			return canonicalValues(table.Info.Columns, row), nil
+		})
+		if err != nil {
+			return &ChecksumInfo{Err: err, Cost: time.Since(started)}
+		}
+		return &ChecksumInfo{Checksum: binary.BigEndian.Uint64(digest[:8]), Digest: digest, Algorithm: canonical.MultisetVersion, Count: multisetCount, Cost: time.Since(started)}
+	}
 	digest, err := canonical.DigestRowsStream(columns, func() ([]any, error) {
 		row, err := iterator.Next()
 		if err != nil {

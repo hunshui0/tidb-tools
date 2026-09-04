@@ -70,13 +70,21 @@ type TableDiff struct {
 	ChunkSize int64 `json:"chunk-size"`
 	// OrderKeyColumns is runtime-only source state used to keep chunking,
 	// row iteration, and merge ordering on the same logical key.
-	OrderKeyColumns []string `json:"-"`
+	OrderKeyColumns []string      `json:"-"`
+	Mode            TableDiffMode `json:"-"`
 
 	// TableLack = 1: the table only exists downstream,
 	// TableLack = -1: the table only exists upstream,
 	// TableLack = 0: the table exists both upstream and downstream.
 	TableLack int `json:"-"`
 }
+
+type TableDiffMode string
+
+const (
+	TableDiffModeKeyset            TableDiffMode = "keyset"
+	TableDiffModeUnorderedChecksum TableDiffMode = "unordered-checksum-only"
+)
 
 func (t *TableDiff) GetOrderKeyColumns() []*model.ColumnInfo {
 	if len(t.OrderKeyColumns) == 0 {

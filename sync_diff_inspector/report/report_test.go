@@ -286,6 +286,19 @@ func TestPrintFixSQLDisabled(t *testing.T) {
 	require.NotContains(t, output, "The patch file has been generated")
 }
 
+func TestChecksumOnlyMismatchReportsUnknownRows(t *testing.T) {
+	report := NewReport(task, true)
+	createTableSQL := "create table `test`.`nokey`(`v` varchar(10))"
+	tableInfo, err := dbutil.GetTableInfoBySQL(createTableSQL, parser.New())
+	require.NoError(t, err)
+	report.Init([]*common.TableDiff{{Schema: "test", Table: "nokey", Info: tableInfo}}, nil, nil)
+	report.SetTableChecksumOnlyResult("test", "nokey", false, 7, 9, &chunk.ChunkID{TableIndex: 0, ChunkIndex: 0, ChunkCnt: 1})
+	result := report.TableResults["test"]["nokey"]
+	require.True(t, result.RowsUnknown)
+	require.False(t, result.DataEqual)
+	require.Contains(t, report.getDiffRows()[0], "unknown/unknown")
+}
+
 func TestGetSnapshot(t *testing.T) {
 	report := NewReport(task)
 	createTableSQL1 := "create table `test`.`tbl`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"

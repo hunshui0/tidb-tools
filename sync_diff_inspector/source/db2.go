@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
 	"github.com/pingcap/tidb-tools/pkg/dbutil"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/chunk"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/config"
@@ -16,6 +17,7 @@ import (
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/utils"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"go.uber.org/zap"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
@@ -34,6 +36,9 @@ type DB2Source struct {
 type DB2TableAnalyzer struct{ source *DB2Source }
 
 func (a DB2TableAnalyzer) AnalyzeSplitter(ctx context.Context, table *common.TableDiff, start *splitter.RangeInfo) (splitter.ChunkIterator, error) {
+	if table.Mode == common.TableDiffModeUnorderedChecksum {
+		return newDB2FullTableIterator(), nil
+	}
 	keys, err := a.source.orderColumns(table)
 	if err != nil {
 		return nil, err
@@ -42,6 +47,11 @@ func (a DB2TableAnalyzer) AnalyzeSplitter(ctx context.Context, table *common.Tab
 }
 
 func (s *DB2Source) orderColumns(table *common.TableDiff) ([]*model.ColumnInfo, error) {
+	for index, candidate := range s.orderKeys {
+		if index < len(s.tableDiffs) && s.tableDiffs[index] == table && len(candidate) > 0 {
+			return candidate, nil
+		}
+	}
 	var columns []*model.ColumnInfo
 	if fields := strings.TrimSpace(table.Fields); fields != "" {
 		seen := make(map[string]struct{})
@@ -103,6 +113,52 @@ func (s *DB2Source) orderColumns(table *common.TableDiff) ([]*model.ColumnInfo, 
 		return nil, errors.Errorf("db2 table %s.%s has no stable non-null chunk key; configure index-fields", table.Schema, table.Table)
 	}
 	return columns, nil
+}
+
+func commonUniqueCandidates(info *model.TableInfo) [][]*model.ColumnInfo {
+	var result [][]*model.ColumnInfo
+	for pass := 0; pass < 2; pass++ {
+		for _, index := range info.Indices {
+			if pass == 0 && !index.Primary {
+				continue
+			}
+			if pass == 1 && (index.Primary || !index.Unique) {
+				continue
+			}
+			candidate := make([]*model.ColumnInfo, 0, len(index.Columns))
+			valid := len(index.Columns) > 0
+			for _, ic := range index.Columns {
+				if ic.Offset < 0 || ic.Offset >= len(info.Columns) || !mysql.HasNotNullFlag(info.Columns[ic.Offset].GetFlag()) {
+					valid = false
+					break
+				}
+				candidate = append(candidate, info.Columns[ic.Offset])
+			}
+			if valid {
+				result = append(result, candidate)
+			}
+		}
+	}
+	return result
+}
+
+func findMatchingCandidate(target, source *model.TableInfo) []*model.ColumnInfo {
+	for _, candidate := range commonUniqueCandidates(target) {
+		sourceCols := make([]*model.ColumnInfo, 0, len(candidate))
+		valid := true
+		for _, col := range candidate {
+			sc := dbutil.FindColumnByName(source.Columns, col.Name.O)
+			if sc == nil || !mysql.HasNotNullFlag(sc.GetFlag()) {
+				valid = false
+				break
+			}
+			sourceCols = append(sourceCols, sc)
+		}
+		if valid && matchesUniqueIndex(source, sourceCols) {
+			return candidate
+		}
+	}
+	return nil
 }
 
 func matchesUniqueIndex(info *model.TableInfo, columns []*model.ColumnInfo) bool {
@@ -314,9 +370,23 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 				return nil, errors.Errorf("db2 index-fields for %s.%s are not a declared primary or unique key in Db2", table.Schema, table.Table)
 			}
 		}
-		keys, err := (&DB2Source{sourceColumns: sourceColumns}).orderColumns(table)
-		if err != nil {
-			return nil, err
+		var keys []*model.ColumnInfo
+		if strings.TrimSpace(table.Fields) != "" {
+			var err error
+			keys, err = (&DB2Source{sourceColumns: sourceColumns}).orderColumns(table)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			keys = findMatchingCandidate(table.Info, info)
+			if len(keys) == 0 {
+				if strings.EqualFold(strings.TrimSpace(ds.NoUniqueKeyMode), "checksum-only") {
+					table.Mode = common.TableDiffModeUnorderedChecksum
+					log.Warn("DB2 table has no common unique key; using full-table checksum-only comparison", zap.String("table", table.Schema+"."+table.Table))
+					continue
+				}
+				return nil, errors.Errorf("db2 table %s.%s has no common stable non-null unique key", table.Schema, table.Table)
+			}
 		}
 		// Automatic selection is based on the target TableInfo. Verify that the
 		// corresponding Db2 columns form the same declared unique key; otherwise
@@ -334,6 +404,7 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 			return nil, errors.Errorf("db2 ordering key for %s.%s is not a declared primary or unique key in Db2", schema, table.Table)
 		}
 		orderKeys[index] = keys
+		table.Mode = common.TableDiffModeKeyset
 		names := make([]string, 0, len(keys))
 		for _, key := range keys {
 			names = append(names, key.Name.O)
@@ -424,7 +495,10 @@ func (s *DB2Source) GetRowsIterator(ctx context.Context, r *splitter.RangeInfo) 
 	}
 	order := make([]string, 0)
 	keys := s.orderKeys[r.GetTableIndex()]
-	if len(keys) == 0 {
+	if table.Mode == common.TableDiffModeUnorderedChecksum {
+		keys = nil
+	}
+	if table.Mode != common.TableDiffModeUnorderedChecksum && len(keys) == 0 {
 		var err error
 		keys, err = s.orderColumns(table)
 		if err != nil {
@@ -462,6 +536,18 @@ func (s *DB2Source) GetRowsIterator(ctx context.Context, r *splitter.RangeInfo) 
 	}
 	return &db2RowsIterator{rows: rows, textDecoder: s.textDecoder, textColumns: textColumns}, nil
 }
+
+type db2FullTableIterator struct{ done bool }
+
+func newDB2FullTableIterator() splitter.ChunkIterator { return &db2FullTableIterator{} }
+func (i *db2FullTableIterator) Next() (*chunk.Range, error) {
+	if i.done {
+		return nil, nil
+	}
+	i.done = true
+	return &chunk.Range{Index: &chunk.ChunkID{ChunkIndex: 0, ChunkCnt: 1}, IsFirst: true, IsLast: true, Type: chunk.Limit}, nil
+}
+func (*db2FullTableIterator) Close() {}
 
 func db2RangeFromChunk(r *chunk.Range, sourceColumns map[string]string) db2util.Range {
 	// Db2 keyset chunks use (previousUpper, currentUpper] for every chunk.

@@ -59,3 +59,35 @@ func TestDigestRowsStreamMatchesBatch(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, batch, stream)
 }
+
+func TestDigestRowsMultisetIsOrderIndependentAndDuplicateSensitive(t *testing.T) {
+	columns := []Column{{Name: "id", Kind: KindInteger}, {Name: "text", Kind: KindString}, {Name: "binary", Kind: KindBinary}, {Name: "price", Kind: KindDecimal, Scale: 2}, {Name: "at", Kind: KindTimestamp}, {Name: "lob", Kind: KindLOB, MaxLOBBytes: 16}}
+	rows := [][]any{{int64(1), "中文", []byte{0, 1}, "1.20", "2026-09-04 12:34:56", []byte("x")}, {int64(2), nil, []byte{2}, "2.00", "2026-09-04 12:34:57", []byte("y")}, {int64(1), "中文", []byte{0, 1}, "1.20", "2026-09-04 12:34:56", []byte("x")}}
+	digest := func(values [][]any) ([32]byte, int64, error) {
+		i := 0
+		return DigestRowsMultisetStream(columns, func() ([]any, error) {
+			if i == len(values) {
+				return nil, io.EOF
+			}
+			v := values[i]
+			i++
+			return v, nil
+		})
+	}
+	first, count, err := digest(rows)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, count)
+	reordered, _, err := digest([][]any{rows[2], rows[0], rows[1]})
+	require.NoError(t, err)
+	require.Equal(t, first, reordered)
+	withoutDuplicate, _, err := digest(rows[:2])
+	require.NoError(t, err)
+	require.NotEqual(t, first, withoutDuplicate)
+	changed, _, err := digest([][]any{rows[0], rows[1], {int64(3), "", []byte{3}, "3.00", "2026-09-04 12:34:58", []byte("z")}})
+	require.NoError(t, err)
+	require.NotEqual(t, first, changed)
+	empty, emptyCount, err := digest(nil)
+	require.NoError(t, err)
+	require.Zero(t, emptyCount)
+	require.NotEqual(t, first, empty)
+}

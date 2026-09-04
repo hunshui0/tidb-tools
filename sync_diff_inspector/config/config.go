@@ -121,6 +121,7 @@ type DataSource struct {
 	ConnectTimeout   string             `toml:"connect-timeout" json:"connect-timeout,omitempty"`
 	ClientCodePage   string             `toml:"client-code-page" json:"client-code-page,omitempty"`
 	SourceCharset    string             `toml:"source-charset" json:"source-charset,omitempty"`
+	NoUniqueKeyMode  string             `toml:"no-unique-key-mode" json:"no-unique-key-mode,omitempty"`
 	ConnectionParams map[string]string  `toml:"connection-params" json:"connection-params,omitempty"`
 	User             string             `toml:"user" json:"user"`
 	Password         utils.SecretString `toml:"password" json:"password"`
@@ -160,6 +161,10 @@ func (d *DataSource) ValidateDatabaseType() error {
 	case DatabaseTypeDB2:
 		if d.Database == "" {
 			return errors.New("db2 data source requires database")
+		}
+		mode := strings.ToLower(strings.TrimSpace(d.NoUniqueKeyMode))
+		if mode != "" && mode != "error" && mode != "checksum-only" {
+			return errors.Errorf("invalid no-unique-key-mode %q (supported: error, checksum-only)", d.NoUniqueKeyMode)
 		}
 		return nil
 	default:

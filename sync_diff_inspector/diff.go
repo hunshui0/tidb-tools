@@ -471,6 +471,12 @@ func (df *Diff) consume(ctx context.Context, rangeInfo *splitter.RangeInfo) bool
 		df.report.SetTableMeetError(schema, table, err)
 	} else if !isEqual {
 		state = checkpoints.FailedState
+		if tableDiff.Mode == common.TableDiffModeUnorderedChecksum {
+			log.Warn("checksum mismatch; row details and fix SQL are unavailable", zap.String("table", dbutil.TableName(schema, table)), zap.String("algorithm", "CanonicalMultisetV1"))
+			dml.node.State = state
+			df.report.SetTableChecksumOnlyResult(schema, table, false, upCount, downCount, id)
+			return false
+		}
 		// if the chunk's checksum differ, try to do binary check
 		info := rangeInfo
 		if upCount > getSplitThreshold() {
@@ -492,7 +498,11 @@ func (df *Diff) consume(ctx context.Context, rangeInfo *splitter.RangeInfo) bool
 		isEqual = isDataEqual
 	}
 	dml.node.State = state
-	df.report.SetTableDataCheckResult(schema, table, isEqual, dml.rowAdd, dml.rowDelete, upCount, downCount, id)
+	if tableDiff.Mode == common.TableDiffModeUnorderedChecksum {
+		df.report.SetTableChecksumOnlyResult(schema, table, isEqual, upCount, downCount, id)
+	} else {
+		df.report.SetTableDataCheckResult(schema, table, isEqual, dml.rowAdd, dml.rowDelete, upCount, downCount, id)
+	}
 	return isEqual
 }
 

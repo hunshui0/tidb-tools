@@ -147,6 +147,17 @@ func GetTableRowsQueryFormat(schema, table string, tableInfo *model.TableInfo, c
 // but allows a source (for example Db2) to provide the exact stable key used
 // for chunking. An empty fields string preserves the historical behavior.
 func GetTableRowsQueryFormatWithOrder(schema, table string, tableInfo *model.TableInfo, collation, fields string) (string, []*model.ColumnInfo) {
+	return getTableRowsQueryFormat(schema, table, tableInfo, collation, fields, true)
+}
+
+// GetTableRowsQueryFormatWithoutOrder is for checksum-only scans where no
+// cross-database ordering can be assumed.
+func GetTableRowsQueryFormatWithoutOrder(schema, table string, tableInfo *model.TableInfo) string {
+	query, _ := getTableRowsQueryFormat(schema, table, tableInfo, "", "", false)
+	return query
+}
+
+func getTableRowsQueryFormat(schema, table string, tableInfo *model.TableInfo, collation, fields string, ordered bool) (string, []*model.ColumnInfo) {
 	orderByCols := dbutil.SelectOrderKey(tableInfo, fields)
 
 	columnNames := make([]string, 0, len(tableInfo.Columns))
@@ -167,8 +178,10 @@ func GetTableRowsQueryFormatWithOrder(schema, table string, tableInfo *model.Tab
 	}
 
 	columns := strings.Join(columnNames, ", ")
-	query := fmt.Sprintf("SELECT /*!40001 SQL_NO_CACHE */ %s FROM %s WHERE %%s ORDER BY %s",
-		columns, dbutil.TableName(schema, table), BuildOrderByClause(orderByCols, collation))
+	query := fmt.Sprintf("SELECT /*!40001 SQL_NO_CACHE */ %s FROM %s WHERE %%s", columns, dbutil.TableName(schema, table))
+	if ordered {
+		query += " ORDER BY " + BuildOrderByClause(orderByCols, collation)
+	}
 
 	return query, orderByCols
 }

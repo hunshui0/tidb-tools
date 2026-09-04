@@ -66,6 +66,7 @@ type TableResult struct {
 	UpCount     int64                   `json:"up-count"`     // `UpCount` is the number of rows in the table from upstream
 	DownCount   int64                   `json:"down-count"`   // `DownCount` is the number of rows in the table from downstream
 	TableLack   int                     `json:"table-lack"`
+	RowsUnknown bool                    `json:"rows-unknown,omitempty"`
 }
 
 // ChunkResult save the necessarily information to provide summary information
@@ -148,7 +149,11 @@ func (r *Report) getDiffRows() [][]string {
 				rowsAdd += chunkResult.RowsAdd
 				rowsDelete += chunkResult.RowsDelete
 			}
-			diffRow = append(diffRow, fmt.Sprintf("+%d/-%d", rowsAdd, rowsDelete), strconv.FormatInt(result.UpCount, 10), strconv.FormatInt(result.DownCount, 10))
+			change := fmt.Sprintf("+%d/-%d", rowsAdd, rowsDelete)
+			if result.RowsUnknown {
+				change = "unknown/unknown"
+			}
+			diffRow = append(diffRow, change, strconv.FormatInt(result.UpCount, 10), strconv.FormatInt(result.DownCount, 10))
 			diffRows = append(diffRows, diffRow)
 		}
 	}
@@ -353,6 +358,17 @@ func (r *Report) SetTableDataCheckResult(schema, table string, equal bool, rowsA
 	}
 	if !equal && common.AllTableExist(result.TableLack) && r.Result != Error {
 		r.Result = Fail
+	}
+}
+
+// SetTableChecksumOnlyResult records an unordered checksum mismatch. Row-level
+// additions/deletions are intentionally unknown and no fix SQL is available.
+func (r *Report) SetTableChecksumOnlyResult(schema, table string, equal bool, upCount, downCount int64, id *chunk.ChunkID) {
+	r.SetTableDataCheckResult(schema, table, equal, 0, 0, upCount, downCount, id)
+	r.Lock()
+	defer r.Unlock()
+	if result := r.TableResults[schema][table]; result != nil {
+		result.RowsUnknown = !equal
 	}
 }
 

@@ -21,6 +21,14 @@ func TestDataSourceDatabaseType(t *testing.T) {
 	require.ErrorContains(t, (&DataSource{Type: "postgres"}).ValidateDatabaseType(), "unsupported data source type")
 }
 
+func TestDB2NoUniqueKeyMode(t *testing.T) {
+	defaultMode := &DataSource{Type: DatabaseTypeDB2, Database: "SAMPLE"}
+	require.NoError(t, defaultMode.ValidateDatabaseType())
+	require.Empty(t, defaultMode.NoUniqueKeyMode)
+	require.NoError(t, (&DataSource{Type: DatabaseTypeDB2, Database: "SAMPLE", NoUniqueKeyMode: "checksum-only"}).ValidateDatabaseType())
+	require.ErrorContains(t, (&DataSource{Type: DatabaseTypeDB2, Database: "SAMPLE", NoUniqueKeyMode: "unsafe"}).ValidateDatabaseType(), "invalid no-unique-key-mode")
+}
+
 func TestTaskRejectsDB2Target(t *testing.T) {
 	task := &TaskConfig{Source: []string{"source"}, Target: "target", OutputDir: t.TempDir()}
 	err := task.Init(map[string]*DataSource{
