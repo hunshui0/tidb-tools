@@ -88,6 +88,9 @@ type Report struct {
 	TotalSize    int64                              `json:"-"` // Total size of the checked tables
 	SourceConfig [][]byte                           `json:"-"`
 	TargetConfig []byte                             `json:"-"`
+	// FixSQLGenerated records whether at least one repair SQL file was actually
+	// written. Export being enabled alone does not imply that a patch exists.
+	FixSQLGenerated bool `json:"fix-sql-generated,omitempty"`
 
 	task         *config.TaskConfig `json:"-"`
 	exportFixSQL bool               `json:"-"`
@@ -98,6 +101,7 @@ func (r *Report) LoadReport(reportInfo *Report) {
 	r.StartTime = time.Now()
 	r.Duration = reportInfo.Duration
 	r.TotalSize = reportInfo.TotalSize
+	r.FixSQLGenerated = reportInfo.FixSQLGenerated
 	for schema, tableMap := range reportInfo.TableResults {
 		if _, ok := r.TableResults[schema]; !ok {
 			r.TableResults[schema] = make(map[string]*TableResult)
@@ -272,7 +276,14 @@ func (r *Report) Print(w io.Writer) error {
 		summary.WriteString("\n")
 		summary.WriteString(fmt.Sprintf("A total of %d tables have been compared, %d tables finished, %d tables failed, %d tables skipped.\n", r.FailedNum+r.PassNum+r.SkippedNum, r.PassNum, r.FailedNum, r.SkippedNum))
 		if r.exportFixSQL {
-			summary.WriteString(fmt.Sprintf("The patch file has been generated in \n\t'%s/'\n", r.task.FixDir))
+			if r.FixSQLGenerated {
+				summary.WriteString(fmt.Sprintf("The patch file has been generated in \n\t'%s/'\n", r.task.FixDir))
+			} else {
+				summary.WriteString("No patch file was generated.\n")
+			}
+			if r.hasChecksumOnlyMismatch() {
+				summary.WriteString("Checksum-only differences have no row details and cannot generate fix SQL.\n")
+			}
 		} else {
 			summary.WriteString("Fix SQL export is disabled; differences were recorded without exporting SQL.\n")
 		}
@@ -290,6 +301,24 @@ func (r *Report) Print(w io.Writer) error {
 	}
 	fmt.Fprint(w, summary.String())
 	return nil
+}
+
+// MarkFixSQLGenerated records that a repair SQL file was successfully written.
+func (r *Report) MarkFixSQLGenerated() {
+	r.Lock()
+	defer r.Unlock()
+	r.FixSQLGenerated = true
+}
+
+func (r *Report) hasChecksumOnlyMismatch() bool {
+	for _, tableMap := range r.TableResults {
+		for _, result := range tableMap {
+			if result.RowsUnknown && !result.DataEqual {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // NewReport returns a new Report.

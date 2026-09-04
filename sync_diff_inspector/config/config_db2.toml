@@ -45,6 +45,7 @@ target-configs = ["orders"]
 [table-configs.orders]
 target-tables = ["app.orders"]
 chunk-size = 2
-# Required when the table has no primary key or non-null unique key. V1 still
-# verifies it as a stable keyset for multi-block reads.
+# Optional explicit keyset fields. When present, the complete column list and
+# order must match a non-null PRIMARY/UNIQUE key on both Db2 and TiDB. Remove
+# this setting for a no-key table that should use checksum-only fallback.
 index-fields = ["id"]

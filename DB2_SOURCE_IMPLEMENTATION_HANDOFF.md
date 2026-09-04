@@ -62,6 +62,8 @@ DB2Source 生产验收。复合键、更多 Db2 类型边界、checkpoint 中断
 - 对没有两端共同非空 PRIMARY/UNIQUE KEY 的 Db2 表，可显式配置
   `no-unique-key-mode = "checksum-only"`。该模式只做整表、无排序、流式
   `CanonicalMultisetV1` 判等；不定位差异、不生成修复 SQL，且中断后从表头重扫。
+- 报告仅在实际写出至少一个修复 SQL 文件后显示补丁目录；checksum-only
+  差异会明确提示无法生成修复 SQL。
 
 ### 不包含
 

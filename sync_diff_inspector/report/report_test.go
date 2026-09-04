@@ -139,6 +139,7 @@ func TestReport(t *testing.T) {
 	new_report.SetTableStructCheckResult("ctest", "atbl", false, true, common.AllTableExistFlag)
 
 	new_report.SetTableStructCheckResult("dtest", "atbl", false, true, common.DownstreamTableLackFlag)
+	new_report.MarkFixSQLGenerated()
 
 	buf := new(bytes.Buffer)
 	new_report.Print(buf)
@@ -297,6 +298,11 @@ func TestChecksumOnlyMismatchReportsUnknownRows(t *testing.T) {
 	require.True(t, result.RowsUnknown)
 	require.False(t, result.DataEqual)
 	require.Contains(t, report.getDiffRows()[0], "unknown/unknown")
+	buf := new(bytes.Buffer)
+	require.NoError(t, report.Print(buf))
+	require.Contains(t, buf.String(), "No patch file was generated.")
+	require.Contains(t, buf.String(), "Checksum-only differences have no row details and cannot generate fix SQL.")
+	require.NotContains(t, buf.String(), "The patch file has been generated")
 }
 
 func TestGetSnapshot(t *testing.T) {

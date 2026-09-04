@@ -850,6 +850,7 @@ func (df *Diff) writeSQLs(ctx context.Context) {
 					}
 				}
 				fixSQLFile.Close()
+				df.report.MarkFixSQLGenerated()
 			}
 			log.Debug("insert node", zap.Any("chunk index", dml.node.GetID()))
 			df.cp.Insert(dml.node)

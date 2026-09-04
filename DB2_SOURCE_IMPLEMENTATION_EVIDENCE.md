@@ -119,6 +119,11 @@ No database was connected and no `-Action Run` command was used for this
 continuation. This is not real DB2/TiDB evidence. In particular, real no-key
 checksums, complete-table scan performance, interrupted full-table restart,
 composite-key execution, repair-SQL execution acceptance, and production
-readiness remain unverified. The Windows native build recorded above predates
-this change; it must be rerun by the user in PowerShell before being treated as
-evidence for this version.
+readiness remain unverified.
+
+After correcting checksum-only fix-SQL reporting, the current version was
+reverified on Windows with `go test -p 1 ./sync_diff_inspector/... -count=1`
+and `scripts/run-db2-local.ps1 -Action Build`; both exited with code 0. The
+serial test setting avoids exhausting the Windows page file while linking the
+large test binaries. These results prove offline tests and native build only,
+not a live Db2/TiDB comparison.
