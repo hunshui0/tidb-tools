@@ -25,12 +25,13 @@ import (
 // DB2Source is deliberately single-instance. It never produces repair SQL;
 // repair SQL remains a TiDB target responsibility.
 type DB2Source struct {
-	tableDiffs    []*common.TableDiff
-	dbConn        *sql.DB
-	schema        string
-	sourceColumns map[int]map[string]string
-	orderKeys     map[int][]*model.ColumnInfo
-	textDecoder   *encoding.Decoder
+	tableDiffs          []*common.TableDiff
+	dbConn              *sql.DB
+	schema              string
+	sourceColumns       map[int]map[string]string
+	incompatibleColumns map[int][]string
+	orderKeys           map[int][]*model.ColumnInfo
+	textDecoder         *encoding.Decoder
 }
 
 type DB2TableAnalyzer struct{ source *DB2Source }
@@ -336,6 +337,7 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 		return nil, err
 	}
 	sourceColumns := make(map[int]map[string]string, len(tableDiffs))
+	incompatibleColumns := make(map[int][]string, len(tableDiffs))
 	orderKeys := make(map[int][]*model.ColumnInfo, len(tableDiffs))
 	for index, table := range tableDiffs {
 		if !common.AllTableExist(table.TableLack) {
@@ -359,7 +361,12 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 			}
 			return nil, errors.Trace(err)
 		}
+		// NewSources already applies ignore-columns to target metadata. Apply it
+		// here too so direct callers use the same filtered view on both sides.
+		table.Info, _ = utils.ResetColumns(table.Info, table.IgnoreColumns)
+		info, _ = utils.ResetColumns(info, table.IgnoreColumns)
 		mapped := make(map[string]string, len(table.Info.Columns))
+		missingTargetColumns := make([]string, 0)
 		for _, targetColumn := range table.Info.Columns {
 			for _, sourceColumn := range info.Columns {
 				if strings.EqualFold(targetColumn.Name.O, sourceColumn.Name.O) {
@@ -368,10 +375,39 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 				}
 			}
 			if mapped[targetColumn.Name.O] == "" {
-				return nil, errors.Errorf("db2 table %s.%s has no column compatible with target column %s", schema, table.Table, targetColumn.Name.O)
+				missingTargetColumns = append(missingTargetColumns, targetColumn.Name.O)
 			}
 		}
 		sourceColumns[index] = mapped
+		sourceOnlyColumns := make([]string, 0)
+		for _, sourceColumn := range info.Columns {
+			found := false
+			for _, targetColumn := range table.Info.Columns {
+				if strings.EqualFold(targetColumn.Name.O, sourceColumn.Name.O) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				sourceOnlyColumns = append(sourceOnlyColumns, sourceColumn.Name.O)
+			}
+		}
+		if len(missingTargetColumns) > 0 || len(sourceOnlyColumns) > 0 {
+			incompatible := append([]string(nil), missingTargetColumns...)
+			for _, name := range sourceOnlyColumns {
+				incompatible = append(incompatible, "source-only:"+name)
+			}
+			incompatibleColumns[index] = incompatible
+			table.IgnoreDataCheck = true
+			table.Mode = ""
+			table.OrderKeyColumns = nil
+			log.Warn("DB2 and target columns differ; structure comparison will report the table and data comparison is disabled",
+				zap.String("table", db2util.TableDiagnostic(schema, table.Table)),
+				zap.Strings("missing_target_columns", missingTargetColumns),
+				zap.Strings("source_only_columns", sourceOnlyColumns),
+			)
+			continue
+		}
 		if strings.TrimSpace(table.Fields) != "" {
 			sourceKeyColumns, err := columnsByFields(info, table.Fields)
 			if err != nil {
@@ -422,7 +458,7 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 		}
 		table.OrderKeyColumns = names
 	}
-	return &DB2Source{tableDiffs: tableDiffs, dbConn: ds.Conn, schema: db2util.NormalizeIdentifier(schema), sourceColumns: sourceColumns, orderKeys: orderKeys, textDecoder: textDecoder}, nil
+	return &DB2Source{tableDiffs: tableDiffs, dbConn: ds.Conn, schema: db2util.NormalizeIdentifier(schema), sourceColumns: sourceColumns, incompatibleColumns: incompatibleColumns, orderKeys: orderKeys, textDecoder: textDecoder}, nil
 }
 
 func columnsByFields(info *model.TableInfo, fields string) ([]*model.ColumnInfo, error) {
@@ -503,12 +539,19 @@ func (s *DB2Source) GetDB() *sql.DB    { return s.dbConn }
 func (*DB2Source) GetSnapshot() string { return "" }
 func (s *DB2Source) GetRowsIterator(ctx context.Context, r *splitter.RangeInfo) (RowDataIterator, error) {
 	table := s.tableDiffs[r.GetTableIndex()]
+	if incompatible := s.incompatibleColumns[r.GetTableIndex()]; len(incompatible) > 0 {
+		return nil, errors.Errorf("db2 data comparison is unavailable because table %s has incompatible columns: %s", db2util.TableDiagnostic(s.schema, table.Table), strings.Join(incompatible, ", "))
+	}
 	schema, sourceTable := s.GetSourceTable(r)
 	columns := make([]string, 0, len(table.Info.Columns))
 	for _, column := range table.Info.Columns {
+		sourceColumn := s.sourceColumns[r.GetTableIndex()][column.Name.O]
+		if sourceColumn == "" {
+			return nil, errors.Errorf("db2 data comparison is unavailable because table %s has incompatible columns: %s", db2util.TableDiagnostic(s.schema, table.Table), column.Name.O)
+		}
 		// DB2 catalog names default to uppercase; the quoted alias preserves the
 		// target column key expected by the existing comparison layer.
-		columns = append(columns, db2util.QuoteIdentifier(s.sourceColumns[r.GetTableIndex()][column.Name.O])+" AS "+db2util.QuoteIdentifier(column.Name.O))
+		columns = append(columns, db2util.QuoteIdentifier(sourceColumn)+" AS "+db2util.QuoteIdentifier(column.Name.O))
 	}
 	order := make([]string, 0)
 	keys := s.orderKeys[r.GetTableIndex()]

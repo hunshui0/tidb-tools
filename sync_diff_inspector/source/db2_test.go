@@ -15,6 +15,7 @@ import (
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/db2util"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/source/common"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/splitter"
+	inspectorUtils "github.com/pingcap/tidb-tools/sync_diff_inspector/utils"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -620,6 +621,122 @@ func TestDB2EmptyTableWithColumnsInitializesNormally(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestDB2TargetExtraColumnIsReportedByStructureComparison(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	id := db2TestKeyColumn("ID", 0, mysql.TypeLonglong)
+	extra := db2TestKeyColumn("APPLY_REASON", 1, mysql.TypeVarString)
+	table := db2TestTable(id, 2)
+	table.Info.Columns = []*model.ColumnInfo{id, extra}
+	table.Table = "TARGET_EXTRA"
+	expectDB2MetadataColumns(mock, "APP", table.Table, "T", true, []db2TestCatalogColumn{{"ID", 0, "BIGINT", 8, 0, "N"}})
+
+	source, err := NewDB2Source(context.Background(), []*common.TableDiff{table}, &config.DataSource{Type: config.DatabaseTypeDB2, Database: "DB", Schema: "APP", Conn: db}, false)
+	require.NoError(t, err)
+	require.True(t, table.IgnoreDataCheck)
+	require.Empty(t, table.OrderKeyColumns)
+	require.Equal(t, common.TableDiffMode(""), table.Mode)
+
+	expectDB2MetadataColumns(mock, "APP", table.Table, "T", true, []db2TestCatalogColumn{{"ID", 0, "BIGINT", 8, 0, "N"}})
+	infos, err := source.GetSourceStructInfo(context.Background(), 0)
+	require.NoError(t, err)
+	require.Len(t, infos[0].Columns, 1)
+	isEqual, isSkip := inspectorUtils.CompareStruct(infos, table.Info)
+	require.False(t, isEqual)
+	require.True(t, isSkip)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDB2SourceExtraColumnIsReportedByStructureComparison(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	table := db2TestTable(db2TestKeyColumn("ID", 0, mysql.TypeLonglong), 2)
+	table.Table = "SOURCE_EXTRA"
+	expectDB2MetadataColumns(mock, "APP", table.Table, "T", true, []db2TestCatalogColumn{
+		{"ID", 0, "BIGINT", 8, 0, "N"}, {"SOURCE_ONLY", 1, "VARCHAR", 20, 0, "Y"},
+	})
+
+	source, err := NewDB2Source(context.Background(), []*common.TableDiff{table}, &config.DataSource{Type: config.DatabaseTypeDB2, Database: "DB", Schema: "APP", Conn: db}, false)
+	require.NoError(t, err)
+	require.True(t, table.IgnoreDataCheck)
+	require.Nil(t, source.(*DB2Source).GetOrderKeyColumns(0))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDB2IncompatibleTableProducesEmptyChunkAndContinues(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	mismatch := db2TestTable(db2TestKeyColumn("ID", 0, mysql.TypeLonglong), 2)
+	mismatch.Table = "MISMATCH"
+	mismatch.Info.Columns = append(mismatch.Info.Columns, db2TestKeyColumn("APPLY_REASON", 1, mysql.TypeVarString))
+	present := db2TestTable(db2TestKeyColumn("ID", 0, mysql.TypeLonglong), 2)
+	present.Table = "PRESENT_AFTER"
+	expectDB2MetadataColumns(mock, "APP", mismatch.Table, "T", true, []db2TestCatalogColumn{{"ID", 0, "BIGINT", 8, 0, "N"}})
+	expectDB2Metadata(mock, "APP", present.Table, "T", true)
+	source, err := NewDB2Source(context.Background(), []*common.TableDiff{mismatch, present}, &config.DataSource{Type: config.DatabaseTypeDB2, Database: "DB", Schema: "APP", Conn: db}, false)
+	require.NoError(t, err)
+	// The second table is allowed to perform its keyset planning query. The
+	// mismatched table must not issue a row query at all.
+	mock.ExpectQuery(`SELECT "ID" FROM "APP"\."PRESENT_AFTER" ORDER BY "ID" FETCH FIRST 3 ROWS ONLY`).WillReturnRows(sqlmock.NewRows([]string{"ID"}).AddRow(int64(1)))
+	ranges, err := source.GetRangeIterator(context.Background(), nil, source.GetTableAnalyzer(), 1)
+	require.NoError(t, err)
+	first, err := ranges.Next(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, chunk.Empty, first.ChunkRange.Type)
+	second, err := ranges.Next(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	require.Equal(t, 1, second.GetTableIndex())
+	ranges.Close()
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDB2GetRowsIteratorRejectsIncompatibleMapping(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	table := db2TestTable(db2TestKeyColumn("ID", 0, mysql.TypeLonglong), 2)
+	table.Table = "BAD_MAPPING"
+	table.Info.Columns = append(table.Info.Columns, db2TestKeyColumn("APPLY_REASON", 1, mysql.TypeVarString))
+	source := &DB2Source{
+		tableDiffs:          []*common.TableDiff{table},
+		dbConn:              db,
+		schema:              "APP",
+		sourceColumns:       map[int]map[string]string{0: {"ID": "ID"}},
+		incompatibleColumns: map[int][]string{0: {"APPLY_REASON"}},
+	}
+	_, err = source.GetRowsIterator(context.Background(), &splitter.RangeInfo{ChunkRange: &chunk.Range{Index: &chunk.ChunkID{TableIndex: 0}}})
+	require.ErrorContains(t, err, "db2 data comparison is unavailable")
+	require.ErrorContains(t, err, "APP.BAD_MAPPING")
+	require.ErrorContains(t, err, "APPLY_REASON")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDB2IgnoreColumnsRemovesMismatchBeforeMapping(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	id := db2TestKeyColumn("ID", 0, mysql.TypeLonglong)
+	extra := db2TestKeyColumn("APPLY_REASON", 1, mysql.TypeVarString)
+	table := db2TestTable(id, 2)
+	table.Table = "IGNORED_COLUMN"
+	table.Info.Columns = []*model.ColumnInfo{id, extra}
+	table.IgnoreColumns = []string{"APPLY_REASON"}
+	expectDB2MetadataColumns(mock, "APP", table.Table, "T", true, []db2TestCatalogColumn{{"ID", 0, "BIGINT", 8, 0, "N"}})
+	source, err := NewDB2Source(context.Background(), []*common.TableDiff{table}, &config.DataSource{Type: config.DatabaseTypeDB2, Database: "DB", Schema: "APP", Conn: db}, false)
+	require.NoError(t, err)
+	require.False(t, table.IgnoreDataCheck)
+	require.Equal(t, common.TableDiffModeKeyset, table.Mode)
+	mock.ExpectQuery(`SELECT "ID" AS "ID" FROM "APP"\."IGNORED_COLUMN" ORDER BY "ID"`).WillReturnRows(sqlmock.NewRows([]string{"ID"}).AddRow(int64(1)))
+	rows, err := source.GetRowsIterator(context.Background(), &splitter.RangeInfo{ChunkRange: &chunk.Range{Index: &chunk.ChunkID{TableIndex: 0}}})
+	require.NoError(t, err)
+	rows.Close()
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestDB2ViewUsesChecksumOnlyWhenItHasNoCommonKey(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
@@ -673,11 +790,25 @@ func expectDB2Object(mock sqlmock.Sqlmock, schema, table, objectType string) {
 	mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["object-case"])).WithArgs(schema, table).WillReturnRows(sqlmock.NewRows([]string{"TABNAME"}))
 }
 
+type db2TestCatalogColumn struct {
+	name          string
+	offset        int
+	typeName      string
+	length, scale int
+	nulls         string
+}
+
 func expectDB2Metadata(mock sqlmock.Sqlmock, schema, table, objectType string, withKey bool) {
+	expectDB2MetadataColumns(mock, schema, table, objectType, withKey, []db2TestCatalogColumn{{"ID", 0, "BIGINT", 8, 0, "N"}})
+}
+
+func expectDB2MetadataColumns(mock sqlmock.Sqlmock, schema, table, objectType string, withKey bool, columns []db2TestCatalogColumn) {
 	expectDB2Object(mock, schema, table, objectType)
-	mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["columns"])).WithArgs(schema, table).WillReturnRows(
-		sqlmock.NewRows([]string{"COLNAME", "COLNO", "TYPENAME", "LENGTH", "SCALE", "NULLS"}).AddRow("ID", 0, "BIGINT", 8, 0, "N"),
-	)
+	columnRows := sqlmock.NewRows([]string{"COLNAME", "COLNO", "TYPENAME", "LENGTH", "SCALE", "NULLS"})
+	for _, column := range columns {
+		columnRows.AddRow(column.name, column.offset, column.typeName, column.length, column.scale, column.nulls)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["columns"])).WithArgs(schema, table).WillReturnRows(columnRows)
 	constraintRows := sqlmock.NewRows([]string{"CONSTNAME", "TYPE", "COLNAME", "COLSEQ"})
 	if withKey {
 		constraintRows.AddRow("PK_"+table, "P", "ID", 1)

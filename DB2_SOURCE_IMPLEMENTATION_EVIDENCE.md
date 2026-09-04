@@ -13,6 +13,21 @@ line-ending changes and are deliberately excluded from this implementation.
 
 ## Missing-object handling update (2026-09-04)
 
+### Column mismatch continuation update (2026-09-04)
+
+- `NewDB2Source` now retains successful same-name mappings while collecting
+  target-only and source-only columns; it no longer aborts initialization for a
+  present table with a structural column mismatch.
+- Such a table is marked for structural comparison, keyset/checksum-only setup
+  is skipped, and `GetRowsIterator` rejects accidental direct data access with
+  an actionable error before SQL construction. `ignore-columns` is applied
+  before mapping.
+- Offline sqlmock coverage verifies target-extra/source-extra columns,
+  `GetSourceStructInfo` returning the real Db2 metadata, structural mismatch
+  results, empty mismatch chunks continuing to a later table, defensive row
+  access, and ignored-column recovery. This is source and offline evidence;
+  real DB2/TiDB validation remains the user's responsibility.
+
 - `buildSourceFromCfg` passes `skip-non-existing-table` into `NewDB2Source`.
 - `SYSCAT.TABLES` is queried first using normalized, parameterized identifiers.
   A miss is classified through exact schema and case-candidate catalog queries:

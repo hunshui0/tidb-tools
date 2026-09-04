@@ -101,6 +101,16 @@ Column mapping is currently same-name (case-insensitive) only. Explicit
 source-to-target column rename configuration is not implemented in this V1;
 tables requiring different names must be renamed or excluded before running.
 
+When a present Db2 object and its TiDB target have different columns, source
+initialization retains the successfully matched names and logs both target-only
+and source-only columns. It then marks the table for structural comparison and
+does not select keyset or checksum-only data paths. `StructEqual` reports the
+structure mismatch and the chunk iterator emits an empty chunk so later tables
+continue. This is not a public-column checksum: a direct row-iterator call is
+rejected with an incompatible-column error instead of generating an empty
+quoted identifier. `ignore-columns` is applied before this mapping, so an
+explicitly ignored target column does not create a mismatch.
+
 ## Tables without a common unique key
 
 The default `no-unique-key-mode` is `error`: a Db2 table must have a non-null
@@ -147,6 +157,14 @@ canonical encoding, and error paths. The user has separately verified a real
 Db2 CLI connection, structure comparison, GBK Chinese conversion, and field
 difference localization, including the current single-column multi-chunk run
 described above.
+
+The column-mismatch handling in this revision has source-level and offline
+sqlmock evidence only. The Windows native Db2 build and the user's real
+Db2-to-TiDB run are separate acceptance steps; neither is implied by the
+offline tests. A real run should confirm that strict mode fails on a genuinely
+missing object, while skip mode reports that object as upstream-missing and
+continues, and that schema, quoted-case, permission, and special-object errors
+still fail.
 
 Consistency is not a distributed snapshot guarantee. V1 requires the source
 and target tables to be static for the duration of a comparison. Db2 target,
