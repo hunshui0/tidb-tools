@@ -53,6 +53,35 @@ func TestDecodeDB2GBKTextRow(t *testing.T) {
 	require.ErrorContains(t, err, "unsupported db2 source-charset")
 }
 
+func TestDB2DecodedRowGeneratesTypedTiDBRepairSQL(t *testing.T) {
+	gbk, err := simplifiedchinese.GBK.NewEncoder().Bytes([]byte("中文"))
+	require.NoError(t, err)
+	columns := []*model.ColumnInfo{
+		{Name: pmodel.NewCIStr("NAME"), FieldType: *types.NewFieldType(mysql.TypeVarString)},
+		{Name: pmodel.NewCIStr("OPTIONAL"), FieldType: *types.NewFieldType(mysql.TypeVarString)},
+		{Name: pmodel.NewCIStr("PAYLOAD"), FieldType: *types.NewFieldType(mysql.TypeBlob)},
+		{Name: pmodel.NewCIStr("AMOUNT"), FieldType: *types.NewFieldType(mysql.TypeNewDecimal)},
+		{Name: pmodel.NewCIStr("BIRTHDAY"), FieldType: *types.NewFieldType(mysql.TypeDate)},
+		{Name: pmodel.NewCIStr("AT"), FieldType: *types.NewFieldType(mysql.TypeDuration)},
+		{Name: pmodel.NewCIStr("UPDATED"), FieldType: *types.NewFieldType(mysql.TypeTimestamp)},
+	}
+	row := map[string]*dbutil.ColumnData{
+		"NAME":     {Data: gbk},
+		"OPTIONAL": {IsNull: true},
+		"PAYLOAD":  {Data: []byte{0x00, 0xFF}},
+		"AMOUNT":   {Data: []byte("123.4500")},
+		"BIRTHDAY": {Data: []byte("2026-09-04")},
+		"AT":       {Data: []byte("12:34:56")},
+		"UPDATED":  {Data: []byte("2026-09-04 12:34:56")},
+	}
+	decoder, err := newDB2TextDecoder("gbk")
+	require.NoError(t, err)
+	require.NoError(t, decodeDB2TextRow(row, map[string]struct{}{"NAME": {}}, decoder))
+	tidb := &TiDBSource{tableDiffs: []*common.TableDiff{{Schema: "APP", Table: "T", Info: &model.TableInfo{Name: pmodel.NewCIStr("T"), Columns: columns}}}}
+	sql := tidb.GenerateFixSQL(Insert, row, nil, 0)
+	require.Equal(t, "REPLACE INTO `APP`.`T`(`NAME`,`OPTIONAL`,`PAYLOAD`,`AMOUNT`,`BIRTHDAY`,`AT`,`UPDATED`) VALUES ('中文',NULL,x'00ff',123.4500,'2026-09-04','12:34:56','2026-09-04 12:34:56');", sql)
+}
+
 func TestDB2OrderColumnsRejectsNullableConfiguredKey(t *testing.T) {
 	info := &model.TableInfo{Columns: []*model.ColumnInfo{{Name: pmodel.NewCIStr("ID"), Offset: 0, FieldType: *types.NewFieldType(mysql.TypeLonglong)}}}
 	table := &common.TableDiff{Schema: "APP", Table: "T", Fields: "ID", Info: info}
@@ -130,6 +159,43 @@ func TestDB2CheckpointResumePreservesTypedBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, next.IsLast)
 	require.Equal(t, int64(2), next.Bounds[0].UpperValue)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDB2CheckpointResumeAfterMultipleKeysetChunks(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	id := db2TestKeyColumn("ID", 0, mysql.TypeLonglong)
+	table := db2TestTable(id, 2)
+	source := db2TestSource(db, table, id)
+	mock.ExpectQuery(`SELECT "ID" FROM "APP"\."T" ORDER BY "ID" FETCH FIRST 3 ROWS ONLY`).WillReturnRows(sqlmock.NewRows([]string{"ID"}).AddRow(int64(1)).AddRow(int64(2)).AddRow(int64(3)))
+	mock.ExpectQuery(`SELECT "ID" FROM "APP"\."T" WHERE \(\("ID" > \?\)\) ORDER BY "ID" FETCH FIRST 3 ROWS ONLY`).WithArgs(int64(2)).WillReturnRows(sqlmock.NewRows([]string{"ID"}).AddRow(int64(3)).AddRow(int64(4)))
+	iter := newDB2KeysetIterator(source, table, []*model.ColumnInfo{id}, nil)
+	first, err := iter.Next()
+	require.NoError(t, err)
+	second, err := iter.Next()
+	require.NoError(t, err)
+	require.False(t, first.IsLast)
+	require.True(t, second.IsLast)
+	require.Equal(t, int64(4), second.Bounds[0].UpperValue)
+
+	data, err := json.Marshal(second)
+	require.NoError(t, err)
+	var restored chunk.Range
+	require.NoError(t, json.Unmarshal(data, &restored))
+	require.IsType(t, int64(0), restored.Bounds[0].UpperValue)
+
+	mock.ExpectQuery(`SELECT "ID" FROM "APP"\."T" WHERE \(\("ID" > \?\)\) ORDER BY "ID" FETCH FIRST 3 ROWS ONLY`).WithArgs(int64(4)).WillReturnRows(sqlmock.NewRows([]string{"ID"}).AddRow(int64(5)))
+	resumed := newDB2KeysetIterator(source, table, []*model.ColumnInfo{id}, &splitter.RangeInfo{ChunkRange: &restored})
+	next, err := resumed.Next()
+	require.NoError(t, err)
+	require.True(t, next.IsLast)
+	require.Equal(t, int64(5), next.Bounds[0].UpperValue)
+	where, args, err := (db2util.DB2Dialect{}).RenderRange(db2RangeFromChunk(next, source.sourceColumns[0]))
+	require.NoError(t, err)
+	require.Equal(t, `(("ID" > ?)) AND (("ID" <= ?))`, where)
+	require.Equal(t, []any{int64(4), int64(5)}, args)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
