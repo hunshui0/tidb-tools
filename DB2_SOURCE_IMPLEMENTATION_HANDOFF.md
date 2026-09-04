@@ -7,7 +7,20 @@
 连续处理 108 个分块并定位 1 个差异字段）。这些是真实运行证据，但不等同于完整
 DB2Source 生产验收。复合键、更多 Db2 类型边界、checkpoint 中断恢复、修复 SQL
 实际验收、性能和生产可用性仍未验证。当前 WSL 仅运行离线测试；新版本 Windows
-原生 Build 未在本轮重验，且未连接任何数据库、未运行 `-Action Run`、未推送远端。
+原生 Build 已在本轮重验通过，且未连接任何数据库、未运行 `-Action Run`、未推送远端。
+
+### 缺失 Db2 对象处理（2026-09-04，待真实验收）
+
+Db2 source 初始化现在将根级 `skip-non-existing-table` 显式传入
+`NewDB2Source`。`db2util.ReadTableInfo` 先以参数化、精确 schema/table
+查询 `SYSCAT.TABLES`，再以集中 catalog 查询区分 `TableNotFoundError`、
+`SchemaNotFoundError`、`IdentifierCaseError`、`UnsupportedObjectError` 和
+`CatalogError`。仅“精确 schema 存在、精确 table 不存在且没有大小写候选”的
+`TableNotFoundError` 会在开启跳过时设置 `UpstreamTableLackFlag`；错误 schema、
+大小写、catalog 查询、权限、连接、列读取和特殊对象错误继续失败。普通
+TABLE/VIEW 可读取列；catalog 可见的 ALIAS、NICKNAME 和其他特殊类型以对象类型报错。缺表不
+进入 keyset、CanonicalMultisetV1、数据扫描或修复 SQL。该项只完成 sqlmock
+离线验证，真实 Db2/TiDB 验收仍由用户执行。
 
 ## 继续实施状态（2026-09-03）
 

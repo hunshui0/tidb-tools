@@ -3,6 +3,10 @@
 
 check-thread-count = 4
 export-fix-sql = true
+# Strict mode is false: a TiDB target table missing from Db2 stops initialization.
+# Set true only to report genuinely missing Db2 source objects as skipped; a
+# missing schema or quoted-name case mismatch remains an initialization error.
+skip-non-existing-table = true
 
 [data-sources.db2_source]
 type = "db2"

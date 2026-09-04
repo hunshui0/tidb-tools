@@ -323,11 +323,11 @@ func db2ValueString(value any) string {
 	}
 }
 
-func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *config.DataSource) (Source, error) {
+func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *config.DataSource, skipNonExistingTable bool) (Source, error) {
 	if ds == nil || ds.Conn == nil {
 		return nil, errors.New("db2 source requires an initialized connection")
 	}
-	schema := ds.Schema
+	schema := db2util.NormalizeIdentifier(ds.Schema)
 	if schema == "" {
 		return nil, errors.New("db2 source requires schema")
 	}
@@ -346,6 +346,17 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 		}
 		info, err := db2util.ReadTableInfo(ctx, ds.Conn, schema, table.Table)
 		if err != nil {
+			if missing := errors.Find(err, func(candidate error) bool {
+				_, ok := candidate.(*db2util.TableNotFoundError)
+				return ok
+			}); missing != nil {
+				if skipNonExistingTable {
+					table.TableLack = common.UpstreamTableLackFlag
+					log.Info("the DB2 source object does not exist; skipping table", zap.String("table", db2util.TableDiagnostic(schema, table.Table)))
+					continue
+				}
+				return nil, errors.Annotatef(err, "db2 source object %s.%s is missing; check the source object, schema, quoted identifier case, target filter, or enable skip-non-existing-table", schema, db2util.NormalizeIdentifier(table.Table))
+			}
 			return nil, errors.Trace(err)
 		}
 		mapped := make(map[string]string, len(table.Info.Columns))
@@ -458,6 +469,9 @@ func (s *DB2Source) GetCountAndMd5(ctx context.Context, r *splitter.RangeInfo) *
 	return CanonicalSource{Source: s}.GetCountAndMd5(ctx, r)
 }
 func (s *DB2Source) GetCountForLackTable(ctx context.Context, r *splitter.RangeInfo) int64 {
+	if !common.AllTableExist(s.tableDiffs[r.GetTableIndex()].TableLack) {
+		return 0
+	}
 	schema, table := s.GetSourceTable(r)
 	var count int64
 	if err := s.dbConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+db2util.QualifiedTable(schema, table)).Scan(&count); err != nil {
@@ -472,6 +486,9 @@ func (s *DB2Source) GetSourceTable(r *splitter.RangeInfo) (string, string) {
 }
 func (s *DB2Source) GetSourceStructInfo(ctx context.Context, index int) ([]*model.TableInfo, error) {
 	table := s.tableDiffs[index]
+	if !common.AllTableExist(table.TableLack) {
+		return nil, nil
+	}
 	info, err := db2util.ReadTableInfo(ctx, s.dbConn, s.schema, table.Table)
 	if err != nil {
 		return nil, err

@@ -27,6 +27,36 @@ Use [config_db2.toml](./config/config_db2.toml) as the minimum configuration.
 Db2 unquoted identifiers are normalized to upper case. Quoted identifiers keep
 their case. `database` and `schema` are mandatory for a Db2 source.
 
+## Missing Db2 source objects
+
+`skip-non-existing-table` is a root-level option, independent of the Db2 data
+source. Its default `false` is strict mode: initialization stops when a table
+selected from TiDB is not present in the exact normalized Db2 schema/table
+pair. The error includes the normalized name and asks the operator to check the
+source object, schema, quoted-identifier case, and target filter.
+
+Set `skip-non-existing-table = true` to report only a genuinely absent Db2
+source object as missing upstream and continue with the remaining tables. A
+genuine absence means the exact schema exists and the catalog has neither the
+exact table nor a differently cased table candidate. Such an object is not
+treated as an empty table, is not checksummed, is not scanned, and never
+produces repair SQL. A missing schema returns `SchemaNotFoundError`; a
+differently cased schema or table returns `IdentifierCaseError` with the
+catalog candidates. Neither is skipped. This setting also does not correct
+catalog permissions or a catalog/connection failure. Use `schema =
+"\"MixedCase\""` and matching quoted table configuration when the Db2 object was
+created with quoted mixed case.
+
+The Db2 catalog lookup is exact. Ordinary `TABLE` and `VIEW` objects are
+supported when their columns can be read; a VIEW without a common key can use
+`no-unique-key-mode = "checksum-only"`. Catalog-visible `ALIAS`, `NICKNAME`,
+materialized-query tables, and other special object types are rejected with
+their catalog type rather than guessed or selected by a case-insensitive
+fallback. Session-declared temporary objects that are not exposed by the
+catalog cannot be distinguished from any other absent object, so they are never
+selected by name fallback. `no-unique-key-mode` controls only present objects
+without a common unique key; it cannot make a missing object checksum-only.
+
 On Windows, set `client-code-page = "1208"` under the Db2 data source when
 Chinese or other non-ASCII characters must be compared. The tool validates this
 as a numeric Db2 code page and sets `DB2CODEPAGE` before the first Db2

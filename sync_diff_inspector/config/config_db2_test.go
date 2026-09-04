@@ -51,4 +51,5 @@ func TestDB2ExampleConfigReferencesTableConfig(t *testing.T) {
 	require.Equal(t, int64(2), tableConfig.ChunkSize)
 	require.Equal(t, []string{"id"}, tableConfig.Fields)
 	require.Equal(t, DatabaseTypeDB2, cfg.DataSources["db2_source"].DatabaseType())
+	require.True(t, cfg.SkipNonExistingTable)
 }

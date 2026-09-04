@@ -11,6 +11,42 @@ The pre-existing working-tree changes affect 103 tracked files, but
 `git diff --ignore-space-at-eol --quiet` exits successfully. They are CRLF/LF
 line-ending changes and are deliberately excluded from this implementation.
 
+## Missing-object handling update (2026-09-04)
+
+- `buildSourceFromCfg` passes `skip-non-existing-table` into `NewDB2Source`.
+- `SYSCAT.TABLES` is queried first using normalized, parameterized identifiers.
+  A miss is classified through exact schema and case-candidate catalog queries:
+  only an existing exact schema with no exact or case-variant table becomes
+  `TableNotFoundError`. Missing schemas use `SchemaNotFoundError`; schema/table
+  case variants use `IdentifierCaseError` without selecting a candidate; catalog
+  failures become `CatalogError` retaining the driver error; unsupported types
+  become `UnsupportedObjectError`.
+- `TABLE` and `VIEW` are accepted when catalog columns are readable. `ALIAS`,
+  `NICKNAME`, materialized-query, declared temporary, and other unsupported
+  object types fail with their type. Quoted identifiers retain exact case.
+- With skip enabled only `TableNotFoundError` marks upstream missing. Missing
+  objects do not enter chunk planning, keyset comparison, CanonicalMultisetV1,
+  row scans, or repair SQL.
+- Added sqlmock coverage for strict/skip behavior, schema and identifier-case
+  failures that must not skip, catalog failure, empty data with readable catalog
+  columns, quoted identifiers, VIEW checksum-only, special objects, mixed tasks,
+  and all-missing empty chunks. These are offline tests, not real Db2/TiDB
+  validation.
+
+### Missing-object continuation verification
+
+| Command | Exit code | Result |
+| --- | ---: | --- |
+| `SYNC_DIFF_RUN_INTEGRATION=0 GOMAXPROCS=2 go test -p 1 ./sync_diff_inspector/db2util ./sync_diff_inspector/source ./sync_diff_inspector/report ./sync_diff_inspector -count=1` | 0 | Passed |
+| `SYNC_DIFF_RUN_INTEGRATION=0 GOMAXPROCS=2 go test -p 1 ./sync_diff_inspector/... -count=1` | 0 | Passed |
+| `go vet ./sync_diff_inspector/db2util ./sync_diff_inspector/source` | 0 | Passed |
+| `go vet ./sync_diff_inspector/db2util ./sync_diff_inspector/source ./sync_diff_inspector/report ./sync_diff_inspector` | 1 | Existing `report/report_test.go` unkeyed `ChunkID` literal warnings; no new DB2 warning |
+| Windows PowerShell `scripts/run-db2-local.ps1 -Action Build` | 0 | Native Build passed |
+| `git diff --check` on task files | 0 | Passed; full-tree check remains affected by preserved user CRLF changes |
+
+These results are offline/build evidence only. No live database was connected,
+and no result here is real DB2/TiDB acceptance evidence.
+
 ### Baseline verification
 
 | Command | Result |

@@ -253,7 +253,7 @@ func buildSourceFromCfg(ctx context.Context, tableDiffs []*common.TableDiff, con
 		return nil, errors.Errorf("no db config detected")
 	}
 	if len(dbs) == 1 && dbs[0].DatabaseType() == config.DatabaseTypeDB2 {
-		return NewDB2Source(ctx, tableDiffs, dbs[0])
+		return NewDB2Source(ctx, tableDiffs, dbs[0], skipNonExistingTable)
 	}
 	if len(dbs) == 1 && !dbs[0].IsAutoDetected() {
 		switch dbs[0].DatabaseType() {

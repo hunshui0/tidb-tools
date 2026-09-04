@@ -487,3 +487,201 @@ func TestDB2KeysetIteratorUsesDialectAndChunkSize(t *testing.T) {
 	require.Equal(t, "2", rangeInfo.Bounds[0].Upper)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestDB2MissingObjectStrictModeReturnsActionableError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	table := &common.TableDiff{Schema: "app", Table: "missing", Info: &model.TableInfo{Columns: []*model.ColumnInfo{db2TestKeyColumn("ID", 0, mysql.TypeLonglong)}}}
+	expectDB2Object(mock, "APP", "MISSING", "")
+
+	_, err = NewDB2Source(context.Background(), []*common.TableDiff{table}, &config.DataSource{Type: config.DatabaseTypeDB2, Database: "DB", Schema: "app", Conn: db, NoUniqueKeyMode: "checksum-only"}, false)
+	require.ErrorContains(t, err, "APP.MISSING")
+	require.ErrorContains(t, err, "quoted identifier case")
+	require.ErrorContains(t, err, "skip-non-existing-table")
+	require.Equal(t, common.AllTableExistFlag, table.TableLack)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestBuildSourceFromCfgPassesSkipForDB2(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	table := &common.TableDiff{Schema: "APP", Table: "MISSING", Info: db2TestTable(db2TestKeyColumn("ID", 0, mysql.TypeLonglong), 2).Info}
+	expectDB2Object(mock, "APP", "MISSING", "")
+
+	source, err := buildSourceFromCfg(context.Background(), []*common.TableDiff{table}, 1, nil, true, nil, &config.DataSource{
+		Type: config.DatabaseTypeDB2, Database: "DB", Schema: "APP", Conn: db,
+	})
+	require.NoError(t, err)
+	require.Equal(t, common.UpstreamTableLackFlag, source.GetTables()[0].TableLack)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDB2MissingObjectSkipContinuesAndDoesNotEnterChecksum(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	missing := &common.TableDiff{Schema: "APP", Table: "MISSING", Info: db2TestTable(db2TestKeyColumn("ID", 0, mysql.TypeLonglong), 2).Info}
+	present := db2TestTable(db2TestKeyColumn("ID", 0, mysql.TypeLonglong), 2)
+	present.Table = "PRESENT"
+	noKey := &common.TableDiff{Schema: "APP", Table: "NO_KEY", Info: &model.TableInfo{Columns: []*model.ColumnInfo{db2TestKeyColumn("ID", 0, mysql.TypeLonglong)}}}
+
+	expectDB2Object(mock, "APP", "MISSING", "")
+	expectDB2Metadata(mock, "APP", "PRESENT", "T", true)
+	expectDB2Metadata(mock, "APP", "NO_KEY", "T", false)
+
+	source, err := NewDB2Source(context.Background(), []*common.TableDiff{missing, present, noKey}, &config.DataSource{
+		Type: config.DatabaseTypeDB2, Database: "DB", Schema: "APP", Conn: db, NoUniqueKeyMode: "checksum-only",
+	}, true)
+	require.NoError(t, err)
+	db2Source := source.(*DB2Source)
+	require.Equal(t, common.UpstreamTableLackFlag, missing.TableLack)
+	require.Equal(t, common.TableDiffModeKeyset, present.Mode)
+	require.Equal(t, common.TableDiffModeUnorderedChecksum, noKey.Mode)
+	require.Nil(t, db2Source.sourceColumns[0])
+	require.Nil(t, db2Source.GetOrderKeyColumns(0))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDB2CatalogFailureIsNotSkipped(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	table := &common.TableDiff{Schema: "APP", Table: "BROKEN", Info: db2TestTable(db2TestKeyColumn("ID", 0, mysql.TypeLonglong), 2).Info}
+	mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["objects"])).WithArgs("APP", "BROKEN").WillReturnError(fmt.Errorf("SQL0551 catalog permission denied"))
+
+	_, err = NewDB2Source(context.Background(), []*common.TableDiff{table}, &config.DataSource{Type: config.DatabaseTypeDB2, Database: "DB", Schema: "APP", Conn: db}, true)
+	require.ErrorContains(t, err, "permission denied")
+	require.NotEqual(t, common.UpstreamTableLackFlag, table.TableLack)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDB2SchemaAndIdentifierCaseErrorsAreNotSkipped(t *testing.T) {
+	tests := []struct {
+		name   string
+		expect func(sqlmock.Sqlmock)
+	}{
+		{
+			name: "missing schema",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["objects"])).WithArgs("NO_SCHEMA", "T").WillReturnRows(sqlmock.NewRows([]string{"TYPE"}))
+				mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["schema"])).WithArgs("NO_SCHEMA").WillReturnRows(sqlmock.NewRows([]string{"SCHEMANAME"}))
+				mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["schema-case"])).WithArgs("NO_SCHEMA").WillReturnRows(sqlmock.NewRows([]string{"SCHEMANAME"}))
+			},
+		},
+		{
+			name: "table case mismatch",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["objects"])).WithArgs("APP", "MIXED").WillReturnRows(sqlmock.NewRows([]string{"TYPE"}))
+				mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["schema"])).WithArgs("APP").WillReturnRows(sqlmock.NewRows([]string{"SCHEMANAME"}).AddRow("APP"))
+				mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["object-case"])).WithArgs("APP", "MIXED").WillReturnRows(sqlmock.NewRows([]string{"TABNAME"}).AddRow("MiXeD"))
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer db.Close()
+			test.expect(mock)
+			table := &common.TableDiff{Schema: "APP", Table: "T", Info: db2TestTable(db2TestKeyColumn("ID", 0, mysql.TypeLonglong), 2).Info}
+			if test.name == "missing schema" {
+				table.Schema = "NO_SCHEMA"
+			}
+			if test.name == "table case mismatch" {
+				table.Table = "MIXED"
+			}
+
+			_, err = NewDB2Source(context.Background(), []*common.TableDiff{table}, &config.DataSource{Type: config.DatabaseTypeDB2, Database: "DB", Schema: table.Schema, Conn: db}, true)
+			require.Error(t, err)
+			require.NotEqual(t, common.UpstreamTableLackFlag, table.TableLack)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestDB2EmptyTableWithColumnsInitializesNormally(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	table := db2TestTable(db2TestKeyColumn("ID", 0, mysql.TypeLonglong), 2)
+	table.Table = "EMPTY_ROWS"
+	expectDB2Metadata(mock, "APP", "EMPTY_ROWS", "T", true)
+	source, err := NewDB2Source(context.Background(), []*common.TableDiff{table}, &config.DataSource{Type: config.DatabaseTypeDB2, Database: "DB", Schema: "APP", Conn: db}, false)
+	require.NoError(t, err)
+	mock.ExpectQuery(`SELECT "ID" AS "ID" FROM "APP"\."EMPTY_ROWS" ORDER BY "ID"`).WillReturnRows(sqlmock.NewRows([]string{"ID"}))
+	iterator, err := source.GetRowsIterator(context.Background(), &splitter.RangeInfo{ChunkRange: &chunk.Range{Index: &chunk.ChunkID{TableIndex: 0}}})
+	require.NoError(t, err)
+	row, err := iterator.Next()
+	require.NoError(t, err)
+	require.Nil(t, row)
+	iterator.Close()
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDB2ViewUsesChecksumOnlyWhenItHasNoCommonKey(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	table := &common.TableDiff{Schema: "APP", Table: "VIEW_SOURCE", Info: &model.TableInfo{Columns: []*model.ColumnInfo{db2TestKeyColumn("ID", 0, mysql.TypeLonglong)}}}
+	expectDB2Metadata(mock, "APP", "VIEW_SOURCE", "V", false)
+	source, err := NewDB2Source(context.Background(), []*common.TableDiff{table}, &config.DataSource{Type: config.DatabaseTypeDB2, Database: "DB", Schema: "APP", Conn: db, NoUniqueKeyMode: "checksum-only"}, false)
+	require.NoError(t, err)
+	require.Equal(t, common.TableDiffModeUnorderedChecksum, table.Mode)
+	_, ok := source.GetTableAnalyzer().(DB2TableAnalyzer)
+	require.True(t, ok)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDB2AllMissingObjectsCanProduceEmptyChunks(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	tables := []*common.TableDiff{
+		{Schema: "APP", Table: "MISSING_A", Info: db2TestTable(db2TestKeyColumn("ID", 0, mysql.TypeLonglong), 2).Info},
+		{Schema: "APP", Table: "MISSING_B", Info: db2TestTable(db2TestKeyColumn("ID", 0, mysql.TypeLonglong), 2).Info},
+	}
+	expectDB2Object(mock, "APP", "MISSING_A", "")
+	expectDB2Object(mock, "APP", "MISSING_B", "")
+	source, err := NewDB2Source(context.Background(), tables, &config.DataSource{Type: config.DatabaseTypeDB2, Database: "DB", Schema: "APP", Conn: db}, true)
+	require.NoError(t, err)
+	ranges, err := source.GetRangeIterator(context.Background(), nil, source.GetTableAnalyzer(), 1)
+	require.NoError(t, err)
+	for i := 0; i < len(tables); i++ {
+		rangeInfo, nextErr := ranges.Next(context.Background())
+		require.NoError(t, nextErr)
+		require.NotNil(t, rangeInfo)
+		require.Equal(t, chunk.Empty, rangeInfo.ChunkRange.Type)
+	}
+	last, err := ranges.Next(context.Background())
+	require.NoError(t, err)
+	require.Nil(t, last)
+	ranges.Close()
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func expectDB2Object(mock sqlmock.Sqlmock, schema, table, objectType string) {
+	rows := sqlmock.NewRows([]string{"TYPE"})
+	if objectType != "" {
+		rows.AddRow(objectType)
+		mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["objects"])).WithArgs(schema, table).WillReturnRows(rows)
+		return
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["objects"])).WithArgs(schema, table).WillReturnRows(rows)
+	mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["schema"])).WithArgs(schema).WillReturnRows(sqlmock.NewRows([]string{"SCHEMANAME"}).AddRow(schema))
+	mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["object-case"])).WithArgs(schema, table).WillReturnRows(sqlmock.NewRows([]string{"TABNAME"}))
+}
+
+func expectDB2Metadata(mock sqlmock.Sqlmock, schema, table, objectType string, withKey bool) {
+	expectDB2Object(mock, schema, table, objectType)
+	mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["columns"])).WithArgs(schema, table).WillReturnRows(
+		sqlmock.NewRows([]string{"COLNAME", "COLNO", "TYPENAME", "LENGTH", "SCALE", "NULLS"}).AddRow("ID", 0, "BIGINT", 8, 0, "N"),
+	)
+	constraintRows := sqlmock.NewRows([]string{"CONSTNAME", "TYPE", "COLNAME", "COLSEQ"})
+	if withKey {
+		constraintRows.AddRow("PK_"+table, "P", "ID", 1)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["constraints"])).WithArgs(schema, table).WillReturnRows(constraintRows)
+	mock.ExpectQuery(regexp.QuoteMeta(db2util.CatalogQueries()["indexes"])).WithArgs(schema, table).WillReturnRows(sqlmock.NewRows([]string{"INDNAME", "UNIQUERULE", "COLNAME", "COLSEQ"}))
+}

@@ -141,7 +141,7 @@ func validateClientCodePage(raw string) (string, error) {
 // retain their exact case and embedded quotes are validated by QuoteIdentifier.
 func NormalizeIdentifier(name string) string {
 	if len(name) >= 2 && name[0] == '"' && name[len(name)-1] == '"' {
-		return name[1 : len(name)-1]
+		return strings.ReplaceAll(name[1:len(name)-1], `""`, `"`)
 	}
 	return strings.ToUpper(name)
 }
