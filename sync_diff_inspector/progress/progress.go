@@ -35,8 +35,9 @@ type TableProgressPrinter struct {
 	finishTableNums   int
 	tableNums         int
 
-	progress int
-	total    int
+	progress     int
+	total        int
+	exportFixSQL bool
 
 	optCh    chan Operator
 	finishCh chan struct{}
@@ -88,7 +89,7 @@ type Operator struct {
 	totalStopUpdate bool
 }
 
-func NewTableProgressPrinter(tableNums int, finishTableNums int) *TableProgressPrinter {
+func NewTableProgressPrinter(tableNums int, finishTableNums int, exportFixSQL ...bool) *TableProgressPrinter {
 	tpp := &TableProgressPrinter{
 		tableList:     list.New(),
 		tableFailList: list.New(),
@@ -99,8 +100,9 @@ func NewTableProgressPrinter(tableNums int, finishTableNums int) *TableProgressP
 		finishTableNums:   finishTableNums,
 		tableNums:         tableNums,
 
-		progress: 0,
-		total:    0,
+		progress:     0,
+		total:        0,
+		exportFixSQL: len(exportFixSQL) == 0 || exportFixSQL[0],
 
 		optCh:    make(chan Operator, 16),
 		finishCh: make(chan struct{}),
@@ -210,10 +212,13 @@ func (tpp *TableProgressPrinter) PrintSummary() {
 				SkippedNum++
 			}
 		}
-		fixStr = fmt.Sprintf(
-			"%s\nThe rest of the tables are all equal.\nA total of %d tables have been compared, %d tables finished, %d tables failed, %d tables skipped.\nThe patch file has been generated to './output_dir/patch.sql'\nYou can view the comparison details through './output_dir/sync_diff_inspector.log'\n",
-			fixStr, tpp.tableNums, tpp.tableNums-tpp.tableFailList.Len(), tpp.tableFailList.Len()-SkippedNum, SkippedNum,
-		)
+		fixStr = fmt.Sprintf("%s\nThe rest of the tables are all equal.\nA total of %d tables have been compared, %d tables finished, %d tables failed, %d tables skipped.\n", fixStr, tpp.tableNums, tpp.tableNums-tpp.tableFailList.Len(), tpp.tableFailList.Len()-SkippedNum, SkippedNum)
+		if tpp.exportFixSQL {
+			fixStr += "The patch file has been generated to './output_dir/patch.sql'\n"
+		} else {
+			fixStr += "Fix SQL export is disabled; differences were recorded without exporting SQL.\n"
+		}
+		fixStr += "You can view the comparison details through './output_dir/sync_diff_inspector.log'\n"
 	}
 
 	fmt.Fprintf(tpp.output, "%s%s\n", cleanStr, fixStr)
@@ -413,16 +418,27 @@ func (tpp *TableProgressPrinter) flush(stateIsChanged bool) {
 	}
 	// show bar
 	// 60 '='+'-'
-	coe := float32(tpp.progressTableNums*tpp.progress)/float32(tpp.tableNums*(tpp.total+1)) + float32(tpp.finishTableNums)/float32(tpp.tableNums)
+	var coe float32
+	if tpp.tableNums > 0 {
+		if tpp.total > 0 {
+			coe = float32(tpp.progressTableNums*tpp.progress)/float32(tpp.tableNums*(tpp.total+1)) + float32(tpp.finishTableNums)/float32(tpp.tableNums)
+		} else {
+			coe = float32(tpp.finishTableNums) / float32(tpp.tableNums)
+		}
+	}
 	numLeft := int(60 * coe)
 	percent := int(100 * coe)
-	fmt.Fprintf(tpp.output, "Progress [%s>%s] %d%% %d/%d\n", strings.Repeat("=", numLeft), strings.Repeat("-", 60-numLeft), percent, tpp.progress, tpp.total)
+	if tpp.total > 0 {
+		fmt.Fprintf(tpp.output, "Progress [%s>%s] %d%% %d/%d\n", strings.Repeat("=", numLeft), strings.Repeat("-", 60-numLeft), percent, tpp.progress, tpp.total)
+	} else {
+		fmt.Fprintf(tpp.output, "Progress [%s>%s] %d blocks processed\n", strings.Repeat("=", numLeft), strings.Repeat("-", 60-numLeft), tpp.progress)
+	}
 }
 
 var progress_ *TableProgressPrinter = nil
 
-func Init(tableNums, finishTableNums int) {
-	progress_ = NewTableProgressPrinter(tableNums, finishTableNums)
+func Init(tableNums, finishTableNums int, exportFixSQL ...bool) {
+	progress_ = NewTableProgressPrinter(tableNums, finishTableNums, exportFixSQL...)
 }
 
 func Inc(name string) {

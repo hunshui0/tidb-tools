@@ -99,7 +99,7 @@ func NewDiff(ctx context.Context, cfg *config.Config) (diff *Diff, err error) {
 		exportFixSQL:     cfg.ExportFixSQL,
 		sqlCh:            make(chan *ChunkDML, splitter.DefaultChannelBuffer),
 		cp:               new(checkpoints.Checkpoint),
-		report:           report.NewReport(&cfg.Task),
+		report:           report.NewReport(&cfg.Task, cfg.ExportFixSQL),
 	}
 	if err = diff.init(ctx, cfg); err != nil {
 		diff.Close()
@@ -204,7 +204,7 @@ func (df *Diff) initCheckpoint() error {
 			return errors.Trace(err)
 		}
 	}
-	progress.Init(len(df.workSource.GetTables()), finishTableNums)
+	progress.Init(len(df.workSource.GetTables()), finishTableNums, df.exportFixSQL)
 	return nil
 }
 

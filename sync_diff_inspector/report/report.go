@@ -88,7 +88,8 @@ type Report struct {
 	SourceConfig [][]byte                           `json:"-"`
 	TargetConfig []byte                             `json:"-"`
 
-	task *config.TaskConfig `json:"-"`
+	task         *config.TaskConfig `json:"-"`
+	exportFixSQL bool               `json:"-"`
 }
 
 // LoadReport loads the report from the checkpoint
@@ -265,7 +266,11 @@ func (r *Report) Print(w io.Writer) error {
 		summary.WriteString("The rest of tables are all equal.\n")
 		summary.WriteString("\n")
 		summary.WriteString(fmt.Sprintf("A total of %d tables have been compared, %d tables finished, %d tables failed, %d tables skipped.\n", r.FailedNum+r.PassNum+r.SkippedNum, r.PassNum, r.FailedNum, r.SkippedNum))
-		summary.WriteString(fmt.Sprintf("The patch file has been generated in \n\t'%s/'\n", r.task.FixDir))
+		if r.exportFixSQL {
+			summary.WriteString(fmt.Sprintf("The patch file has been generated in \n\t'%s/'\n", r.task.FixDir))
+		} else {
+			summary.WriteString("Fix SQL export is disabled; differences were recorded without exporting SQL.\n")
+		}
 		summary.WriteString(fmt.Sprintf("You can view the comparison details through '%s/%s'\n", r.task.OutputDir, config.LogFileName))
 	} else {
 		summary.WriteString("Error in comparison process:\n")
@@ -283,11 +288,12 @@ func (r *Report) Print(w io.Writer) error {
 }
 
 // NewReport returns a new Report.
-func NewReport(task *config.TaskConfig) *Report {
+func NewReport(task *config.TaskConfig, exportFixSQL ...bool) *Report {
 	return &Report{
 		TableResults: make(map[string]map[string]*TableResult),
 		Result:       Pass,
 		task:         task,
+		exportFixSQL: len(exportFixSQL) == 0 || exportFixSQL[0],
 	}
 }
 
