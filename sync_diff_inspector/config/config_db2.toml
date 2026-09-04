@@ -37,9 +37,11 @@ output-dir = "/tmp/sync-diff-db2"
 source-instances = ["db2_source"]
 target-instance = "tidb_target"
 target-check-tables = ["app.orders"]
+target-configs = ["orders"]
 
 [table-configs.orders]
 target-tables = ["app.orders"]
+chunk-size = 2
 # Required when the table has no primary key or non-null unique key. V1 still
-# verifies it as one stable block until Db2 multi-block validation is added.
+# verifies it as a stable keyset for multi-block reads.
 index-fields = ["id"]

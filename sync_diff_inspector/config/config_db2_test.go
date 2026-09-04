@@ -29,3 +29,18 @@ func TestTaskRejectsDB2Target(t *testing.T) {
 	}, nil)
 	require.ErrorContains(t, err, "supported only as an upstream source")
 }
+
+func TestDB2ExampleConfigReferencesTableConfig(t *testing.T) {
+	cfg := NewConfig()
+	require.NoError(t, cfg.configFromFile("config_db2.toml"))
+	require.Contains(t, cfg.Task.Source, "db2_source")
+	require.Equal(t, "tidb_target", cfg.Task.Target)
+	require.Contains(t, cfg.Task.CheckTables, "app.orders")
+	require.Equal(t, []string{"orders"}, cfg.Task.TableConfigs)
+	tableConfig, ok := cfg.TableConfigs["orders"]
+	require.True(t, ok)
+	require.Equal(t, []string{"app.orders"}, tableConfig.TargetTables)
+	require.Equal(t, int64(2), tableConfig.ChunkSize)
+	require.Equal(t, []string{"id"}, tableConfig.Fields)
+	require.Equal(t, DatabaseTypeDB2, cfg.DataSources["db2_source"].DatabaseType())
+}

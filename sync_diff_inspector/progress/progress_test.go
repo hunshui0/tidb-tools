@@ -76,10 +76,10 @@ func TestTableError(t *testing.T) {
 		t,
 		"\x1b[0A\x1b[JComparing the table structure of 1 ... failure\n"+
 			"_____________________________________________________________________________\n"+
-			"Progress [===============>---------------------------------------------] 25% 0/0\n"+
+			"Progress [===============>---------------------------------------------] 0 blocks processed\n"+
 			"\x1b[2A\x1b[JComparing the table structure of 2 ... failure\n"+
 			"_____________________________________________________________________________\n"+
-			"Progress [==============================>------------------------------] 50% 0/0\n"+
+			"Progress [==============================>------------------------------] 0 blocks processed\n"+
 			"\x1b[2A\x1b[JComparing the table data of 3 ...skipped\n"+
 			"_____________________________________________________________________________\n"+
 			"Progress [=============================================>---------------] 75% 0/1\n"+
@@ -87,6 +87,19 @@ func TestTableError(t *testing.T) {
 			"You can view the comparison details through './output_dir/sync_diff_inspector.log'\n",
 		buffer.String(),
 	)
+}
+
+func TestProgressSummaryFixSQLDisabled(t *testing.T) {
+	p := NewTableProgressPrinter(1, 0, false)
+	p.RegisterTable("orders", true, true, common.AllTableExistFlag)
+	p.StartTable("orders", 1, true)
+	p.Close()
+	buffer := new(bytes.Buffer)
+	p.SetOutput(buffer)
+	p.PrintSummary()
+	output := buffer.String()
+	require.Contains(t, output, "Fix SQL export is disabled; differences were recorded without exporting SQL.")
+	require.NotContains(t, output, "The patch file has been generated")
 }
 
 func TestAllSuccess(t *testing.T) {

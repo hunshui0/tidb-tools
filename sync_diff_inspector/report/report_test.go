@@ -272,6 +272,20 @@ func TestPrint(t *testing.T) {
 		"You can view the comparison details through 'output_dir/sync_diff.log'\n")
 }
 
+func TestPrintFixSQLDisabled(t *testing.T) {
+	report := NewReport(task, false)
+	createTableSQL := "create table `test`.`tbl`(`a` int, primary key(`a`))"
+	tableInfo, err := dbutil.GetTableInfoBySQL(createTableSQL, parser.New())
+	require.NoError(t, err)
+	report.Init([]*common.TableDiff{{Schema: "test", Table: "tbl", Info: tableInfo}}, nil, nil)
+	report.SetTableStructCheckResult("test", "tbl", false, false, common.AllTableExistFlag)
+	buf := new(bytes.Buffer)
+	require.NoError(t, report.Print(buf))
+	output := buf.String()
+	require.Contains(t, output, "Fix SQL export is disabled; differences were recorded without exporting SQL.")
+	require.NotContains(t, output, "The patch file has been generated")
+}
+
 func TestGetSnapshot(t *testing.T) {
 	report := NewReport(task)
 	createTableSQL1 := "create table `test`.`tbl`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
