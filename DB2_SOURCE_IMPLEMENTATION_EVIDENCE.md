@@ -48,15 +48,16 @@ go vet ./sync_diff_inspector/db2util ./sync_diff_inspector/canonical \
   ./sync_diff_inspector/source ./sync_diff_inspector/utils
 ```
 
-The native-driver probe behaved as expected for this host:
+The native-driver probe is not a successful native build on this host:
 
 ```text
 go test -tags db2cli ./sync_diff_inspector/db2util
 fatal error: sqlcli1.h: No such file or directory
 ```
 
-This confirms that the Db2 CLI headers are absent; it is not a successful
-native-driver build.
+That historical probe ran before the portable CLI headers were present in the
+current worktree; it is retained as historical evidence, not a current build
+result.
 
 ## Real database evidence
 
@@ -67,8 +68,10 @@ field. It did not exercise the newer keyset multi-chunk implementation.
 
 The current keyset multi-chunk, typed checkpoint resume, and streaming
 changes have only offline test evidence in this repository. A Windows native
-build of this newer revision has not been re-verified here. No claim is made
-for current-version real connectivity, multi-chunk end-to-end comparison,
+build of this newer revision was attempted with
+`scripts/run-db2-local.ps1 -Action Build` but is blocked because the Windows
+process PATH has no `gcc` executable; the repository has no portable Windows
+compiler to add automatically. No claim is made for current-version real connectivity, multi-chunk end-to-end comparison,
 repair-SQL acceptance, performance, or production readiness.
 
 ## Continuation verification (feature/db2-source)
@@ -86,6 +89,7 @@ Windows-safe checkpoint writes. It does not connect to Db2, TiDB, PD, or etcd.
 | `/tmp/go123/bin/go test ./sync_diff_inspector/...` | Not clean: existing `source/common.TestConnect` expects a local listener at `127.0.0.1:4000`; no DB2/TiDB service was started |
 | `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 /tmp/go123/bin/go build ./sync_diff_inspector` | Passed (ELF binary) |
 | `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 /tmp/go123/bin/go build ./sync_diff_inspector` | Passed (PE32+ binary; execution not attempted in WSL) |
+| `scripts/run-db2-local.ps1 -Action Build` (Windows PowerShell) | Blocked: Windows process PATH has no `gcc`; no program was started |
 | `git diff --check c26c52c^..HEAD` | Passed |
 
 The streaming API retains only one row while producing the same digest as the
