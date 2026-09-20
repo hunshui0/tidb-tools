@@ -1,0 +1,5 @@
+# Settings for db2-migrate itself. These are deliberately separate from
+# tidb-lightning.toml, which is passed directly to TiDB Lightning.
+[tools]
+sync-diff-binary = "../bin/sync_diff_inspector"
+tidb-toolkit-dir = "../toolkit"

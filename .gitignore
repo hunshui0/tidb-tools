@@ -12,3 +12,5 @@ sync_diff_inspector/config/config_db2.local.toml
 .local-tools-linux/
 release/
 tmp/
+/toolkit/
+/db2_migration_cli/bin/
