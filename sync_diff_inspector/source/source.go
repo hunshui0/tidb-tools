@@ -138,11 +138,15 @@ func IsDB2Source(s Source) bool {
 }
 
 func NewSources(ctx context.Context, cfg *config.Config) (downstream Source, upstream Source, err error) {
+	startup := utils.NewStartupProgress("初始化比较数据源", 4)
+	defer func() { startup.Finish(err) }()
+	startup.Update(0, "连接上下游数据库")
 	// init db connection for upstream / downstream.
 	err = initDBConn(ctx, cfg)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
+	startup.Update(1, "列举目标表并读取元数据")
 	tablesToBeCheck, err := initTables(ctx, cfg)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
@@ -228,6 +232,7 @@ func NewSources(ctx context.Context, cfg *config.Config) (downstream Source, ups
 	bucketSpliterPool := utils.NewWorkerPool(uint(cfg.CheckThreadCount), "bucketIter")
 	// for mysql_shard, it needs `cfg.CheckThreadCount` + `cfg.SplitThreadCount` at most, because it cannot use bucket.
 	mysqlConnCount := cfg.CheckThreadCount + cfg.SplitThreadCount
+	startup.Update(2, "构建上游数据源并读取表元数据")
 	upstream, err = buildSourceFromCfg(ctx, tableDiffs, mysqlConnCount, bucketSpliterPool, cfg.SkipNonExistingTable, cfg.Task.TargetCheckTables, cfg.Task.SourceInstances...)
 	if err != nil {
 		return nil, nil, errors.Annotate(err, "from upstream")
@@ -235,6 +240,7 @@ func NewSources(ctx context.Context, cfg *config.Config) (downstream Source, ups
 	if len(upstream.GetTables()) == 0 {
 		return nil, nil, errors.Errorf("no table need to be compared")
 	}
+	startup.Update(3, "构建目标数据源并匹配表")
 	downstream, err = buildSourceFromCfg(ctx, upstream.GetTables(), mysqlConnCount, bucketSpliterPool, cfg.SkipNonExistingTable, cfg.Task.TargetCheckTables, cfg.Task.TargetInstance)
 	if err != nil {
 		return nil, nil, errors.Annotate(err, "from downstream")
@@ -245,6 +251,7 @@ func NewSources(ctx context.Context, cfg *config.Config) (downstream Source, ups
 		upstream = CanonicalSource{Source: upstream}
 		downstream = CanonicalSource{Source: downstream}
 	}
+	startup.Update(4, "")
 	return downstream, upstream, nil
 }
 
@@ -336,7 +343,15 @@ func initDBConn(ctx context.Context, cfg *config.Config) error {
 	return nil
 }
 
-func connectDataSource(ctx context.Context, ds *config.DataSource, connectionCount int) (*sql.DB, error) {
+func connectDataSource(ctx context.Context, ds *config.DataSource, connectionCount int) (db *sql.DB, err error) {
+	startup := utils.NewStartupProgress("连接数据库", 1)
+	startup.Update(0, ds.DatabaseType()+" "+ds.Host)
+	defer func() {
+		if err == nil {
+			startup.Update(1, "")
+		}
+		startup.Finish(err)
+	}()
 	if ds.DatabaseType() == config.DatabaseTypeDB2 {
 		return db2util.Connect(ctx, ds, connectionCount)
 	}
@@ -344,6 +359,9 @@ func connectDataSource(ctx context.Context, ds *config.DataSource, connectionCou
 }
 
 func initTables(ctx context.Context, cfg *config.Config) (cfgTables []*config.TableConfig, err error) {
+	startup := utils.NewStartupProgress("读取目标表元数据", 0)
+	defer func() { startup.Finish(err) }()
+	startup.Update(0, "列举目标数据库")
 	downStreamConn := cfg.Task.TargetInstance.Conn
 	TargetTablesList := make([]*common.TableSource, 0)
 	targetSchemas, err := dbutil.GetSchemas(ctx, downStreamConn)
@@ -355,6 +373,7 @@ func initTables(ctx context.Context, cfg *config.Config) (cfgTables []*config.Ta
 		if filter.IsSystemSchema(schema) {
 			continue
 		}
+		startup.Update(0, "列举目标表："+schema)
 		allTables, err := dbutil.GetTables(ctx, downStreamConn, schema)
 		if err != nil {
 			return nil, errors.Annotatef(err, "get tables from target source %s", schema)
@@ -371,14 +390,23 @@ func initTables(ctx context.Context, cfg *config.Config) (cfgTables []*config.Ta
 	// will add default source information, don't worry, we will use table config's info replace this later.
 	// cfg.Tables.Schema => cfg.Tables.Tables => target/source Schema.Table
 	cfgTables = make([]*config.TableConfig, 0, len(TargetTablesList))
+	selected := 0
+	for _, table := range TargetTablesList {
+		if cfg.Task.TargetCheckTables.MatchTable(table.OriginSchema, table.OriginTable) {
+			selected++
+		}
+	}
+	startup.SetTotal(selected)
+	startup.Update(0, "获取目标数据库版本")
 	version := utils.TryToGetVersion(ctx, downStreamConn)
 	for _, tables := range TargetTablesList {
 		if cfg.Task.TargetCheckTables.MatchTable(tables.OriginSchema, tables.OriginTable) {
+			startup.Update(len(cfgTables), dbutil.TableName(tables.OriginSchema, tables.OriginTable))
 			log.Debug("match target table", zap.String("table", dbutil.TableName(tables.OriginSchema, tables.OriginTable)))
 
-			tableInfo, err := dbutil.GetTableInfoWithVersion(ctx, downStreamConn, tables.OriginSchema, tables.OriginTable, version)
+			tableInfo, err := utils.GetTableInfoWithRetry(ctx, downStreamConn, tables.OriginSchema, tables.OriginTable, version)
 			if err != nil {
-				return nil, errors.Errorf("get table %s.%s's information error %s", tables.OriginSchema, tables.OriginTable, errors.ErrorStack(err))
+				return nil, errors.Annotatef(err, "get table %s.%s's information failed", tables.OriginSchema, tables.OriginTable)
 			}
 			// Initialize all the tables that matches the `target-check-tables`[config.toml] and appears in downstream.
 			cfgTables = append(cfgTables, &config.TableConfig{
@@ -417,6 +445,7 @@ func initTables(ctx context.Context, cfg *config.Config) (cfgTables []*config.Ta
 			}
 		}
 	}
+	startup.Update(len(cfgTables), "")
 	return cfgTables, nil
 }
 

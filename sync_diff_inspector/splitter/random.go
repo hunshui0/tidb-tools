@@ -24,7 +24,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb-tools/pkg/dbutil"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/chunk"
-	"github.com/pingcap/tidb-tools/sync_diff_inspector/progress"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/source/common"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/utils"
 	"github.com/pingcap/tidb/pkg/meta/model"
@@ -168,7 +167,6 @@ NEXTINDEX:
 		chunks = chunks[:(len(chunks) - v.(int))]
 	})
 
-	progress.StartTable(progressID, len(chunks), true)
 	return &RandomIterator{
 		table:     table,
 		chunkSize: chunkSize,

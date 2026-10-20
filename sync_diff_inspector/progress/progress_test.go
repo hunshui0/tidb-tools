@@ -15,107 +15,185 @@ package progress
 
 import (
 	"bytes"
+	"container/list"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/source/common"
 	"github.com/stretchr/testify/require"
 )
 
-func TestProgress(t *testing.T) {
-	p := NewTableProgressPrinter(6, 0)
-	p.RegisterTable("1", true, true, common.AllTableExistFlag)
-	p.StartTable("1", 50, true)
-	p.RegisterTable("2", true, false, common.AllTableExistFlag)
-	p.StartTable("2", 2, true)
-	p.Inc("2")
-	p.RegisterTable("3", false, false, common.AllTableExistFlag)
-	p.StartTable("3", 1, false)
-	p.Inc("2")
-	p.Inc("3")
-	p.UpdateTotal("3", 1, true)
-	p.Inc("3")
-	p.StartTable("4", 1, true)
-	p.FailTable("4")
-	p.Inc("3")
-	p.Inc("4")
-	p.RegisterTable("5", true, true, common.UpstreamTableLackFlag)
-	p.StartTable("5", 1, true)
-	p.RegisterTable("6", true, true, common.DownstreamTableLackFlag)
-	p.StartTable("6", 1, true)
-	time.Sleep(500 * time.Millisecond)
-	p.Close()
-	buffer := new(bytes.Buffer)
-	p.SetOutput(buffer)
-	p.PrintSummary()
-	require.Equal(
-		t,
-		"\x1b[1A\x1b[J\nSummary:\n\nThe structure of 1 is not equal.\nThe structure of 2 is not equal.\nThe data of 4 is not equal.\nThe data of 5 does not exist in upstream database.\nThe data of 6 does not exist in downstream database.\n"+
-			"\nThe rest of the tables are all equal.\nA total of 6 tables have been compared, 1 tables finished, 3 tables failed, 2 tables skipped.\nThe patch file has been generated to './output_dir/patch.sql'\n"+
-			"You can view the comparison details through './output_dir/sync_diff_inspector.log'\n\n",
-		buffer.String(),
-	)
-}
-
-func TestTableError(t *testing.T) {
-	p := NewTableProgressPrinter(4, 0)
-	p.RegisterTable("1", true, true, common.AllTableExistFlag)
-	p.StartTable("1", 50, true)
-	p.RegisterTable("2", true, true, common.AllTableExistFlag)
-	p.StartTable("2", 1, true)
-	p.RegisterTable("3", true, true, common.DownstreamTableLackFlag)
-	p.StartTable("3", 1, true)
-
-	p.Inc("2")
-	buffer := new(bytes.Buffer)
-	p.SetOutput(buffer)
-	p.Error(errors.New("[aaa]"))
-	time.Sleep(500 * time.Millisecond)
-	require.Equal(
-		t,
-		"\x1b[0A\x1b[JComparing the table structure of 1 ... failure\n"+
-			"_____________________________________________________________________________\n"+
-			"Progress [===============>---------------------------------------------] 0 blocks processed\n"+
-			"\x1b[2A\x1b[JComparing the table structure of 2 ... failure\n"+
-			"_____________________________________________________________________________\n"+
-			"Progress [==============================>------------------------------] 0 blocks processed\n"+
-			"\x1b[2A\x1b[JComparing the table data of 3 ...skipped\n"+
-			"_____________________________________________________________________________\n"+
-			"Progress [=============================================>---------------] 75% 0/1\n"+
-			"\x1b[1A\x1b[J\nError in comparison process:\n[aaa]\n\n"+
-			"You can view the comparison details through './output_dir/sync_diff_inspector.log'\n",
-		buffer.String(),
-	)
-}
-
-func TestProgressSummaryFixSQLDisabled(t *testing.T) {
-	p := NewTableProgressPrinter(1, 0, false)
-	p.RegisterTable("orders", true, true, common.AllTableExistFlag)
-	p.StartTable("orders", 1, true)
-	p.Close()
-	buffer := new(bytes.Buffer)
-	p.SetOutput(buffer)
-	p.PrintSummary()
-	output := buffer.String()
-	require.Contains(t, output, "Fix SQL export is disabled; differences were recorded without exporting SQL.")
-	require.NotContains(t, output, "The patch file has been generated")
-}
-
-func TestAllSuccess(t *testing.T) {
-	Init(2, 0)
-	RegisterTable("1", false, false, common.AllTableExistFlag)
-	StartTable("1", 1, true)
-	RegisterTable("2", false, false, common.AllTableExistFlag)
-	StartTable("2", 1, true)
-	Inc("1")
-	Inc("2")
-	Close()
+func TestProgressDynamicTotalsAndLateFinalization(t *testing.T) {
 	buf := new(bytes.Buffer)
-	SetOutput(buf)
-	PrintSummary()
-	require.Equal(t, buf.String(), "\x1b[1A\x1b[J\nSummary:\n\n"+
-		"A total of 2 tables have been compared and all are equal.\n"+
-		"You can view the comparison details through './output_dir/sync_diff_inspector.log'\n\n",
-	)
+	p := newTableProgressPrinter(2, 0, buf)
+	p.RegisterTable("dynamic", false, false, common.AllTableExistFlag)
+	p.StartTable("dynamic", 0, false)
+	p.UpdateTotal("dynamic", 1, false)
+	p.Inc("dynamic")
+	p.UpdateTotal("dynamic", 99, false)
+	for i := 0; i < 99; i++ {
+		p.Inc("dynamic")
+	}
+	// All consumers finish before the splitter reports EOF.
+	p.UpdateTotal("dynamic", 0, true)
+	p.RegisterTable("fixed", false, false, common.AllTableExistFlag)
+	p.StartTable("fixed", 1, true)
+	p.Inc("fixed")
+	p.Close()
+	require.Equal(t, 2, p.finishTableNums)
+	require.Empty(t, p.tableMap)
+	require.Equal(t, 101, p.progress)
+	require.Equal(t, 101, p.total)
+	require.Contains(t, buf.String(), "0% | tables 0/2")
+	require.Contains(t, buf.String(), "50% | tables 1/2")
+	require.Contains(t, buf.String(), "100% | tables 2/2 | chunks 101/101")
+}
+
+func TestProgressSkippedTablesAndDifferences(t *testing.T) {
+	buf := new(bytes.Buffer)
+	p := newTableProgressPrinter(5, 0, buf, false)
+	p.RegisterTable("bad-structure", true, true, common.AllTableExistFlag)
+	p.StartTable("bad-structure", 1, true)
+	p.Inc("bad-structure")
+	p.RegisterTable("missing-up", true, true, common.UpstreamTableLackFlag)
+	p.StartTable("missing-up", 1, true)
+	p.Inc("missing-up")
+	p.RegisterTable("missing-down", true, true, common.DownstreamTableLackFlag)
+	p.StartTable("missing-down", 1, true)
+	p.Inc("missing-down")
+	p.RegisterTable("bad-data", false, false, common.AllTableExistFlag)
+	p.StartTable("bad-data", 1, true)
+	p.FailTable("bad-data")
+	p.Inc("bad-data")
+	p.RegisterTable("both", true, false, common.AllTableExistFlag)
+	p.StartTable("both", 1, true)
+	p.FailTable("both")
+	p.Inc("both")
+	p.Close()
+	require.Equal(t, 5, p.finishTableNums)
+	require.Empty(t, p.tableMap)
+	require.Equal(t, 2, p.progress)
+	require.Equal(t, 2, p.total)
+	require.Equal(t, 5, p.tableFailList.Len())
+	p.PrintSummary()
+	require.Contains(t, buf.String(), "The structure of both is not equal.")
+	require.Contains(t, buf.String(), "The data of both is not equal.")
+	require.Contains(t, buf.String(), "Fix SQL export is disabled")
+}
+
+func TestProgressResumeAndZeroChunks(t *testing.T) {
+	buf := new(bytes.Buffer)
+	p := newTableProgressPrinter(3, 2, buf)
+	p.RegisterTable("resumed", false, false, common.AllTableExistFlag)
+	p.StartTable("resumed", 0, false)
+	p.UpdateTotal("resumed", 0, true)
+	p.Close()
+	require.Equal(t, 3, p.finishTableNums)
+	require.Empty(t, p.tableMap)
+	require.Contains(t, buf.String(), "66% | tables 2/3")
+	require.Contains(t, buf.String(), "100% | tables 3/3")
+}
+
+func TestStructureOnlyProgress(t *testing.T) {
+	buf := new(bytes.Buffer)
+	p := newTableProgressPrinter(1, 0, buf)
+	p.RegisterTable("structure-only", false, true, common.AllTableExistFlag)
+	p.StartTable("structure-only", 0, true)
+	p.Close()
+	require.Equal(t, 1, p.finishTableNums)
+	require.Contains(t, buf.String(), "100% | tables 1/1")
+	require.Contains(t, buf.String(), "Comparing the table data of structure-only ... skipped")
+	require.NotContains(t, buf.String(), "Comparing the table data of structure-only ... equivalent")
+}
+
+func TestProgressErrorDoesNotCompletePendingTable(t *testing.T) {
+	buf := new(bytes.Buffer)
+	p := newTableProgressPrinter(1, 0, buf)
+	p.StartTable("error", 2, false)
+	p.Inc("error")
+	p.Error(errors.New("boundary query failed"))
+	require.Zero(t, p.finishTableNums)
+	require.Contains(t, buf.String(), "boundary query failed")
+	require.NotContains(t, buf.String(), "100% | tables")
+}
+
+func TestProgressBarBounds(t *testing.T) {
+	for _, finished := range []int{-1, 0, 1, 2} {
+		buf := new(bytes.Buffer)
+		p := &TableProgressPrinter{tableNums: 1, finishTableNums: finished, output: buf}
+		require.NotPanics(t, func() { p.flush(false) })
+	}
+}
+
+func TestTerminalProgressFitsWidthAndIdleTicksDoNotScroll(t *testing.T) {
+	for _, width := range []int{30, 40, 60, 80, 120, 200} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			p := &TableProgressPrinter{output: buf, tableNums: 2868, finishTableNums: 1424,
+				progress: 1430, total: 1458, terminalWidth: func() int { return width }}
+			p.flush(false)
+			first := buf.String()
+			for i := 0; i < 100; i++ {
+				p.flush(false)
+			}
+			require.Equal(t, first, buf.String(), "idle refreshes must emit no output")
+			p.progress++
+			p.finishTableNums++
+			p.flush(false)
+			// Each redraw starts at column zero, clears only that row and stays
+			// strictly within its width. No newline or cursor-up is permitted.
+			require.NotContains(t, buf.String(), "\n")
+			frames := strings.Split(buf.String(), "\r\x1b[2K")[1:]
+			require.Len(t, frames, 2)
+			for _, frame := range frames {
+				require.Less(t, len(frame), width)
+				require.Contains(t, frame, "49%")
+			}
+			if width >= 60 {
+				require.Contains(t, frames[1], "tables 1425/2868 | chunks 1431/1458")
+			}
+			p.endLine()
+			require.True(t, strings.HasSuffix(buf.String(), "\r\n"))
+		})
+	}
+}
+
+func TestTerminalLifecycleMessagesAreNotRepeated(t *testing.T) {
+	buf := new(bytes.Buffer)
+	p := &TableProgressPrinter{tableList: list.New(), tableNums: 1, terminalWidth: func() int { return 80 }}
+	p.init()
+	p.output = buf
+	p.tableList.PushBack(&TableProgress{name: "example", state: TABLE_STATE_PRESTART})
+	p.flush(true)
+	p.flush(true)
+	p.flush(false)
+	require.Equal(t, 1, strings.Count(buf.String(), "Comparing the table structure"))
+	require.Equal(t, 1, strings.Count(buf.String(), "Comparing the table data"))
+	require.NotContains(t, strings.ReplaceAll(buf.String(), "\r\n", ""), "\n")
+	require.NotContains(t, buf.String(), "\x1b[1A")
+}
+
+func TestRedirectedProgressIsPlainTextAndNotRepeated(t *testing.T) {
+	buf := new(bytes.Buffer)
+	p := &TableProgressPrinter{output: buf, tableNums: 2868, finishTableNums: 1424, progress: 1430, total: 1458}
+	p.flush(false)
+	for i := 0; i < 100; i++ {
+		p.flush(false)
+	}
+	require.Equal(t, "Progress 49% | tables 1424/2868 | chunks 1430/1458\n", buf.String())
+	require.NotContains(t, buf.String(), "\x1b")
+}
+
+func TestTerminalResizeRedrawsWithinNewWidth(t *testing.T) {
+	buf := new(bytes.Buffer)
+	width := 120
+	p := &TableProgressPrinter{output: buf, tableNums: 2868, finishTableNums: 1424, terminalWidth: func() int { return width }}
+	p.flush(false)
+	width = 40
+	p.flush(false)
+	frames := strings.Split(buf.String(), "\r\x1b[2K")[1:]
+	require.Len(t, frames, 2)
+	require.Less(t, len(frames[1]), width)
 }

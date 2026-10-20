@@ -69,6 +69,8 @@ func (t *ChunksIterator) produceChunks(ctx context.Context, startRange *splitter
 		// if this chunk is empty, data-check for this table should be skipped
 		if startRange.ChunkRange.Type != chunk.Empty {
 			pool.Apply(func() {
+				progressID := dbutil.TableName(curTable.Schema, curTable.Table)
+				progress.StartTable(progressID, 0, false)
 				chunkIter, err := t.tableAnalyzer.AnalyzeSplitter(ctx, curTable, startRange)
 				if err != nil {
 					t.errCh <- errors.Trace(err)
@@ -82,9 +84,11 @@ func (t *ChunksIterator) produceChunks(ctx context.Context, startRange *splitter
 						return
 					}
 					if c == nil {
+						progress.UpdateTotal(progressID, 0, true)
 						break
 					}
 					c.Index.TableIndex = curIndex
+					progress.UpdateTotal(progressID, 1, false)
 					select {
 					case <-ctx.Done():
 						log.Info("Stop do produce chunks by context done")
@@ -92,7 +96,7 @@ func (t *ChunksIterator) produceChunks(ctx context.Context, startRange *splitter
 					case t.chunksCh <- &splitter.RangeInfo{
 						ChunkRange: c,
 						IndexID:    getCurTableIndexID(chunkIter),
-						ProgressID: dbutil.TableName(curTable.Schema, curTable.Table),
+						ProgressID: progressID,
 					}:
 					}
 				}
@@ -130,6 +134,8 @@ func (t *ChunksIterator) produceChunks(ctx context.Context, startRange *splitter
 
 		pool.Apply(func() {
 			table := t.TableDiffs[curTableIndex]
+			progressID := dbutil.TableName(table.Schema, table.Table)
+			progress.StartTable(progressID, 0, false)
 			chunkIter, err := t.tableAnalyzer.AnalyzeSplitter(ctx, table, nil)
 			if err != nil {
 				t.errCh <- errors.Trace(err)
@@ -143,9 +149,11 @@ func (t *ChunksIterator) produceChunks(ctx context.Context, startRange *splitter
 					return
 				}
 				if c == nil {
+					progress.UpdateTotal(progressID, 0, true)
 					break
 				}
 				c.Index.TableIndex = curTableIndex
+				progress.UpdateTotal(progressID, 1, false)
 				select {
 				case <-ctx.Done():
 					log.Info("Stop do produce chunks by context done")
@@ -153,7 +161,7 @@ func (t *ChunksIterator) produceChunks(ctx context.Context, startRange *splitter
 				case t.chunksCh <- &splitter.RangeInfo{
 					ChunkRange: c,
 					IndexID:    getCurTableIndexID(chunkIter),
-					ProgressID: dbutil.TableName(table.Schema, table.Table),
+					ProgressID: progressID,
 				}:
 				}
 			}
@@ -168,7 +176,14 @@ func (t *ChunksIterator) Next(ctx context.Context) (*splitter.RangeInfo, error) 
 		return nil, nil
 	case r, ok := <-t.chunksCh:
 		if !ok && r == nil {
-			return nil, nil
+			// Producers queue errors before closing chunksCh. Prefer a pending
+			// error over a successful end-of-stream when both are ready.
+			select {
+			case err := <-t.errCh:
+				return nil, errors.Trace(err)
+			default:
+				return nil, nil
+			}
 		}
 		return r, nil
 	case err := <-t.errCh:

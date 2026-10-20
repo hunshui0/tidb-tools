@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb-tools/pkg/dbutil"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/chunk"
-	"github.com/pingcap/tidb-tools/sync_diff_inspector/progress"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/source/common"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/utils"
 	"github.com/pingcap/tidb/pkg/meta/model"
@@ -150,7 +149,6 @@ func NewLimitIteratorWithCheckpoint(ctx context.Context, progressID string, tabl
 		columnOffset,
 	}
 
-	progress.StartTable(progressID, 0, false)
 	if !undone {
 		// this table is finished.
 		close(chunksCh)
@@ -200,7 +198,6 @@ func (lmt *LimitIterator) produceChunks(ctx context.Context, bucketID int) {
 			// there is no row in result set
 			chunk.InitChunk(chunkRange, chunk.Limit, bucketID, bucketID, lmt.table.Collation, lmt.table.Range)
 			bucketID++
-			progress.UpdateTotal(lmt.progressID, 1, true)
 			select {
 			case <-ctx.Done():
 			case lmt.chunksCh <- chunkRange:
@@ -217,7 +214,6 @@ func (lmt *LimitIterator) produceChunks(ctx context.Context, bucketID int) {
 
 		chunk.InitChunk(chunkRange, chunk.Limit, bucketID, bucketID, lmt.table.Collation, lmt.table.Range)
 		bucketID++
-		progress.UpdateTotal(lmt.progressID, 1, false)
 		select {
 		case <-ctx.Done():
 			return

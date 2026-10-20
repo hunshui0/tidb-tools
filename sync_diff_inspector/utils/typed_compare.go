@@ -10,6 +10,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb-tools/pkg/dbutil"
+	"github.com/pingcap/tidb-tools/sync_diff_inspector/canonical"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/types"
@@ -113,7 +114,15 @@ func compareTemporal(a, b string, typ byte) (int, error) {
 	}
 	layouts := []string{"2006-01-02 15:04:05.999999999", time.RFC3339Nano}
 	if typ == mysql.TypeDate {
-		layouts = []string{"2006-01-02"}
+		left, err := canonical.NormalizeDate(a)
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		right, err := canonical.NormalizeDate(b)
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		return strings.Compare(left, right), nil
 	}
 	if typ == mysql.TypeDuration {
 		layouts = []string{"15:04:05.999999999", "15:04:05"}

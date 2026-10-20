@@ -79,6 +79,7 @@ type Diff struct {
 	checkThreadCount int
 	splitThreadCount int
 	exportFixSQL     bool
+	checkStructOnly  bool
 	sqlWg            sync.WaitGroup
 	checkpointWg     sync.WaitGroup
 
@@ -97,10 +98,12 @@ func NewDiff(ctx context.Context, cfg *config.Config) (diff *Diff, err error) {
 		checkThreadCount: cfg.CheckThreadCount,
 		splitThreadCount: cfg.SplitThreadCount,
 		exportFixSQL:     cfg.ExportFixSQL,
+		checkStructOnly:  cfg.CheckStructOnly,
 		sqlCh:            make(chan *ChunkDML, splitter.DefaultChannelBuffer),
 		cp:               new(checkpoints.Checkpoint),
 		report:           report.NewReport(&cfg.Task, cfg.ExportFixSQL),
 	}
+	diff.report.SetCheckMode(cfg.CheckStructOnly, cfg.CheckDataOnly)
 	if err = diff.init(ctx, cfg); err != nil {
 		diff.Close()
 		return nil, errors.Trace(err)
@@ -140,6 +143,9 @@ func (df *Diff) Close() {
 }
 
 func (df *Diff) init(ctx context.Context, cfg *config.Config) (err error) {
+	startup := utils.NewStartupProgress("准备比较任务", 4)
+	defer func() { startup.Finish(err) }()
+	startup.Update(0, "初始化数据库连接和表信息")
 	// TODO adjust config
 	setTiDBCfg()
 
@@ -148,18 +154,22 @@ func (df *Diff) init(ctx context.Context, cfg *config.Config) (err error) {
 		return errors.Trace(err)
 	}
 
+	startup.Update(1, "选择分块数据源并准备快照")
 	df.workSource = df.pickSource(ctx)
 	df.FixSQLDir = cfg.Task.FixDir
 	df.CheckpointDir = cfg.Task.CheckpointDir
 
+	startup.Update(2, "初始化比较报告")
 	sourceConfigs, targetConfig, err := getConfigsForReport(cfg)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	df.report.Init(df.downstream.GetTables(), sourceConfigs, targetConfig)
+	startup.Update(3, "读取断点并准备比较进度")
 	if err := df.initCheckpoint(); err != nil {
 		return errors.Trace(err)
 	}
+	startup.Update(4, "")
 	return nil
 }
 
@@ -254,6 +264,7 @@ func getConfigsForReport(cfg *config.Config) ([][]byte, []byte, error) {
 
 // Equal tests whether two database have same data and schema.
 func (df *Diff) Equal(ctx context.Context) error {
+	log.Info("开始生成并比较数据分块", zap.Int("tables", len(df.workSource.GetTables())))
 	chunksIter, err := df.generateChunksIterator(ctx)
 	if err != nil {
 		return errors.Trace(err)
@@ -299,13 +310,17 @@ func (df *Diff) Equal(ctx context.Context) error {
 	return nil
 }
 
-func (df *Diff) StructEqual(ctx context.Context) error {
+func (df *Diff) StructEqual(ctx context.Context) (err error) {
 	tables := df.downstream.GetTables()
 	tableIndex := 0
 	if df.startRange != nil {
 		tableIndex = df.startRange.ChunkRange.Index.TableIndex
 	}
+	startIndex := tableIndex
+	startup := utils.NewStartupProgress("检查表结构", len(tables)-startIndex)
+	defer func() { startup.Finish(err) }()
 	for ; tableIndex < len(tables); tableIndex++ {
+		startup.Update(tableIndex-startIndex, dbutil.TableName(tables[tableIndex].Schema, tables[tableIndex].Table))
 		isEqual, isSkip, isAllTableExist := false, true, tables[tableIndex].TableLack
 		if common.AllTableExist(isAllTableExist) {
 			var err error
@@ -314,9 +329,13 @@ func (df *Diff) StructEqual(ctx context.Context) error {
 				return errors.Trace(err)
 			}
 		}
-		progress.RegisterTable(dbutil.TableName(tables[tableIndex].Schema, tables[tableIndex].Table), !isEqual, isSkip, isAllTableExist)
+		progress.RegisterTable(dbutil.TableName(tables[tableIndex].Schema, tables[tableIndex].Table), !isEqual, isSkip || df.checkStructOnly, isAllTableExist)
 		df.report.SetTableStructCheckResult(tables[tableIndex].Schema, tables[tableIndex].Table, isEqual, isSkip, isAllTableExist)
+		if df.checkStructOnly {
+			progress.StartTable(dbutil.TableName(tables[tableIndex].Schema, tables[tableIndex].Table), 0, true)
+		}
 	}
+	startup.Update(len(tables)-startIndex, "")
 	return nil
 }
 

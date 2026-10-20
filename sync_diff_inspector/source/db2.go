@@ -264,6 +264,12 @@ func (i *db2KeysetIterator) Next() (*chunk.Range, error) {
 	}
 	if len(values) == 0 {
 		i.done = true
+		if i.chunkIndex == 0 {
+			// An empty source still needs a checksum/count comparison with
+			// the target. No chunks would leave the data check unperformed.
+			i.chunkIndex++
+			return &chunk.Range{Index: &chunk.ChunkID{ChunkCnt: 1}, Type: chunk.Limit, IsFirst: true, IsLast: true}, nil
+		}
 		return nil, nil
 	}
 	final := len(values) <= i.chunkSize
@@ -324,7 +330,7 @@ func db2ValueString(value any) string {
 	}
 }
 
-func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *config.DataSource, skipNonExistingTable bool) (Source, error) {
+func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *config.DataSource, skipNonExistingTable bool) (result Source, err error) {
 	if ds == nil || ds.Conn == nil {
 		return nil, errors.New("db2 source requires an initialized connection")
 	}
@@ -339,7 +345,10 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 	sourceColumns := make(map[int]map[string]string, len(tableDiffs))
 	incompatibleColumns := make(map[int][]string, len(tableDiffs))
 	orderKeys := make(map[int][]*model.ColumnInfo, len(tableDiffs))
+	startup := utils.NewStartupProgress("读取 DB2 表元数据", len(tableDiffs))
+	defer func() { startup.Finish(err) }()
 	for index, table := range tableDiffs {
+		startup.Update(index, dbutil.TableName(schema, table.Table))
 		if !common.AllTableExist(table.TableLack) {
 			continue
 		}
@@ -458,6 +467,7 @@ func NewDB2Source(ctx context.Context, tableDiffs []*common.TableDiff, ds *confi
 		}
 		table.OrderKeyColumns = names
 	}
+	startup.Update(len(tableDiffs), "")
 	return &DB2Source{tableDiffs: tableDiffs, dbConn: ds.Conn, schema: db2util.NormalizeIdentifier(schema), sourceColumns: sourceColumns, incompatibleColumns: incompatibleColumns, orderKeys: orderKeys, textDecoder: textDecoder}, nil
 }
 

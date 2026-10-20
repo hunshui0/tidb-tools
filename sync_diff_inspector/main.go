@@ -97,6 +97,7 @@ func main() {
 }
 
 func checkSyncState(ctx context.Context, cfg *config.Config) bool {
+	fmt.Printf("正在初始化数据库连接和表信息，阶段进度及耗时请查看 %s\n", filepath.Join(cfg.Task.OutputDir, config.LogFileName))
 	beginTime := time.Now()
 	defer func() {
 		log.Info("check data finished", zap.Duration("cost", time.Since(beginTime)))

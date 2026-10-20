@@ -279,21 +279,16 @@ func floatValue(value any) ([]byte, bool, error) {
 }
 
 func temporalValue(value any, timestamp bool) ([]byte, bool, error) {
+	if !timestamp {
+		date, err := NormalizeDate(value)
+		return []byte(date), false, err
+	}
 	if t, ok := value.(time.Time); ok {
-		if timestamp {
-			return []byte(t.UTC().Format(time.RFC3339Nano)), false, nil
-		}
-		return []byte(t.Format("2006-01-02")), false, nil
+		return []byte(t.UTC().Format(time.RFC3339Nano)), false, nil
 	}
 	text, err := textValue(value)
 	if err != nil {
 		return nil, false, err
-	}
-	if !timestamp {
-		if _, err := time.Parse("2006-01-02", text); err != nil {
-			return nil, false, err
-		}
-		return []byte(text), false, nil
 	}
 	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999"} {
 		if t, err := time.Parse(layout, text); err == nil {
@@ -301,6 +296,26 @@ func temporalValue(value any, timestamp bool) ([]byte, bool, error) {
 		}
 	}
 	return nil, false, fmt.Errorf("invalid timestamp %q", text)
+}
+
+// NormalizeDate preserves the calendar date of a SQL DATE value. Drivers may
+// return time.Time, which database/sql serializes as RFC3339 when scanned into
+// []byte. A DATE has no instant or time zone: converting to UTC could move it to
+// the previous/next day. Only declared DATE columns should use this function.
+func NormalizeDate(value any) (string, error) {
+	if t, ok := value.(time.Time); ok {
+		return t.Format("2006-01-02"), nil
+	}
+	text, err := textValue(value)
+	if err != nil {
+		return "", err
+	}
+	for _, layout := range []string{"2006-01-02", time.RFC3339Nano, "2006-01-02 15:04:05.999999999"} {
+		if t, err := time.Parse(layout, text); err == nil {
+			return t.Format("2006-01-02"), nil
+		}
+	}
+	return "", fmt.Errorf("invalid date %q", text)
 }
 
 func timeOnlyValue(value any) ([]byte, bool, error) {

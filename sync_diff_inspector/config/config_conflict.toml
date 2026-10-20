@@ -1,60 +1,71 @@
-# Diff Configuration.
+# 数据比较配置。
+# 此文件用于演示表配置冲突：config1 和 config2 会匹配同一批表，实际运行时会报冲突。
 
-######################### Global config #########################
+######################### 全局配置 #########################
 
-# how many goroutines are created to check data
+# 数据比较的并发工作协程数。
 check-thread-count = 4
 
-# set false if just want compare data by checksum, will skip select data when checksum is not equal.
-# set true if want compare all different rows, will slow down the total compare time.
+# 是否导出修复 SQL：true 表示允许导出，false 表示不导出。
+# 关闭导出不会关闭数据比较；无唯一键的整表校验模式不支持差异行定位和修复 SQL。
 export-fix-sql = true
 
-# ignore check table's data
+# 是否只比较表结构；true 时跳过数据比较。
 check-struct-only = false
 
+######################### 数据源配置 #########################
 
-######################### Databases config #########################
 [data-sources]
 [data-sources.mysql1]
     host = "127.0.0.1"
     port = 3306
     user = "root"
     password = ""
-    # mysql doesn't has snapshot config
+
+    # MySQL 不支持此处的快照配置。
 
 [data-sources.tidb0]
     host = "127.0.0.1"
     port = 4000
     user = "root"
     password = ""
-    # remove comment if use tidb's snapshot data
+
+    # 如需读取 TiDB 快照数据，可取消以下其中一行的注释；支持时间字符串或 TSO。
     # snapshot = "2016-10-08 16:45:26"
     # snapshot = "386902609362944000"
 
-######################### Task config #########################
-# Required
+######################### 比较任务配置 #########################
+
+# 必填的任务配置。
+
 [task]
-    # 1 fix sql: fix-target-TIDB1.sql
-    # 2 log: sync-diff.log
-    # 3 summary: summary.txt
-    # 4 checkpoint: a dir
+
+    # 输出目录包含以下比较产物：
+    # 1. 修复 SQL：仅在允许导出且存在可修复差异时生成。
+    # 2. 日志：sync_diff.log；3. 逐表比较报告：summary.txt。
+    # 4. 断点目录：保存续跑所需的进度和比较结果。
     output-dir = "/tmp/output/config_conflict"
 
     source-instances = ["mysql1"]
 
     target-instance = "tidb0"
 
-    # tables need to check. *Include `schema` and `table`. Use `.` to split*
+    # 选择要比较的目标表，格式为“库名.表名”；支持通配符，! 前缀表示排除。
+    # 此处决定比较范围；下方 target-tables 只决定表配置的应用范围，不会扩大比较范围。
     target-check-tables = ["schema*.table*", "!c.*", "test2.t2"]
 
-    # extra table config
+    # 引用下方表级配置的名称；不需要定制分块大小、过滤条件等选项时可不配置。
     target-configs= ["config1", "config2"]
 
-# Optional
+# 可选的表级配置。
+
 [table-configs]
+
 [table-configs.config1]
-# tables need to use this specified config.
-# if use this config. target-tables should be a subset of #target-check-tables
+
+# 指定哪些已选中的目标表使用本段配置；同一张表不能同时匹配多个已引用的表配置。
+# 实际应用范围为 target-tables 与 target-check-tables 选中表的交集。
+# 若本段配置要应用于所有已选中表，可使用 target-tables = ["*.*"]，无需重复具体表范围。
 target-tables = ["schema*.table*", "test2.t2"]
 range = "age > 10 AND age < 20"
 index-fields = [""]
@@ -63,7 +74,8 @@ chunk-size = 0
 collation = ""
 
 [table-configs.config2]
-# conflict config with config1
+
+# 本段与 config1 匹配同一批表，会触发表配置冲突；此处保留用于冲突校验示例。
 target-tables = ["schema*.table*", "test2.t2"]
 range = "age > 10 AND age < 20"
 index-fields = [""]

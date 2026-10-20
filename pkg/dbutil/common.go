@@ -923,7 +923,7 @@ func GetSessionVariable(ctx context.Context, db QueryExecutor, variable string) 
 		}
 	}
 
-	if rows.Err() != nil {
+	if err := rows.Err(); err != nil {
 		return "", errors.Trace(err)
 	}
 

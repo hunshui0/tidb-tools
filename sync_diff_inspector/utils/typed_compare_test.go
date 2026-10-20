@@ -21,3 +21,18 @@ func TestCompareColumnDataKeepsIntegerAndDecimalPrecision(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, cmp)
 }
+
+func TestCompareDateAcrossDriverFormatsPreservesCalendarDay(t *testing.T) {
+	column := &model.ColumnInfo{FieldType: *types.NewFieldType(mysql.TypeDate)}
+	left := &dbutil.ColumnData{Data: []byte("2020-06-19T00:00:00+08:00")}
+	for _, text := range []string{"2020-06-19", "2020-06-19T00:00:00+14:00"} {
+		cmp, err := compareColumnData(left, &dbutil.ColumnData{Data: []byte(text)}, column, "")
+		require.NoError(t, err)
+		require.Zero(t, cmp)
+	}
+	cmp, err := compareColumnData(left, &dbutil.ColumnData{Data: []byte("2020-06-18")}, column, "")
+	require.NoError(t, err)
+	require.Equal(t, 1, cmp)
+	_, err = compareColumnData(left, &dbutil.ColumnData{Data: []byte("2020-02-30")}, column, "")
+	require.Error(t, err)
+}

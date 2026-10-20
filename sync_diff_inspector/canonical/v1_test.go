@@ -20,6 +20,49 @@ func TestCanonicalV1CrossDriverValues(t *testing.T) {
 	require.Equal(t, a, b)
 }
 
+func TestDateDriverRepresentationsHaveSameCanonicalEncoding(t *testing.T) {
+	column := []Column{{Name: "JYRQ", Kind: KindDate}}
+	expected, err := EncodeRow(column, []any{"2020-06-19"})
+	require.NoError(t, err)
+	for _, value := range []any{
+		[]byte("2020-06-19"),
+		"2020-06-19T00:00:00+08:00",
+		[]byte("2020-06-19T00:00:00+08:00"),
+		"2020-06-19T00:00:00.000000000+14:00",
+		"2020-06-19T23:00:00-12:00",
+		"2020-06-19 00:00:00",
+		"2020-06-19 00:00:00.000000",
+		time.Date(2020, 6, 19, 0, 0, 0, 0, time.FixedZone("UTC+8", 8*3600)),
+		time.Date(2020, 6, 19, 0, 0, 0, 0, time.FixedZone("UTC+14", 14*3600)),
+	} {
+		actual, err := EncodeRow(column, []any{value})
+		require.NoError(t, err, "%v", value)
+		require.Equal(t, expected, actual, "%v", value)
+	}
+	different, err := EncodeRow(column, []any{"2020-06-20T00:00:00+08:00"})
+	require.NoError(t, err)
+	require.NotEqual(t, expected, different)
+}
+
+func TestDateNormalizationRejectsInvalidDatesAndPreservesOtherTypes(t *testing.T) {
+	for _, value := range []any{"2020-02-30", "2020-02-30T00:00:00+08:00", "2020-06-19garbage", "2020-06-19T99:00:00+08:00", "0000-00-00", 20200619} {
+		_, err := EncodeRow([]Column{{Name: "JYRQ", Kind: KindDate}}, []any{value})
+		require.ErrorContains(t, err, "CanonicalV1 column JYRQ")
+	}
+	// Timestamp values still represent instants and retain their existing UTC encoding.
+	instant, err := EncodeRow([]Column{{Name: "t", Kind: KindTimestamp}}, []any{"2020-06-19T00:00:00+08:00"})
+	require.NoError(t, err)
+	utc, err := EncodeRow([]Column{{Name: "t", Kind: KindTimestamp}}, []any{"2020-06-18T16:00:00Z"})
+	require.NoError(t, err)
+	require.Equal(t, utc, instant)
+	// Date-like strings in character columns remain character data.
+	a, err := EncodeRow([]Column{{Name: "s", Kind: KindString}}, []any{"2020-06-19"})
+	require.NoError(t, err)
+	b, err := EncodeRow([]Column{{Name: "s", Kind: KindString}}, []any{"2020-06-19T00:00:00+08:00"})
+	require.NoError(t, err)
+	require.NotEqual(t, a, b)
+}
+
 func TestCanonicalV1DistinguishesNullEmptyAndTypes(t *testing.T) {
 	stringColumn := []Column{{Name: "x", Kind: KindString}}
 	nullRow, err := EncodeRow(stringColumn, []any{nil})

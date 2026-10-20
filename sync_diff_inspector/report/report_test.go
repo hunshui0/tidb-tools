@@ -16,544 +16,238 @@ package report
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
-	"path"
+	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/BurntSushi/toml"
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/pingcap/tidb-tools/pkg/dbutil"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/chunk"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/config"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/source/common"
-	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/stretchr/testify/require"
 )
 
-var task *config.TaskConfig = &config.TaskConfig{
-	OutputDir:     "output_dir",
-	FixDir:        "output_dir/123456/fix-on-tidb1",
-	CheckpointDir: "output_dir/123456/checkpoint",
+func testReport(t *testing.T, names ...string) *Report {
+	t.Helper()
+	r := NewReport(&config.TaskConfig{OutputDir: t.TempDir(), FixDir: "fix"})
+	tables := make([]*common.TableDiff, 0, len(names))
+	for _, name := range names {
+		tables = append(tables, &common.TableDiff{Schema: "test", Table: name})
+	}
+	r.Init(tables, [][]byte{[]byte("host = source\n")}, []byte("host = target\n"))
+	return r
 }
 
-func TestReport(t *testing.T) {
-	ctx := context.Background()
-
-	db, mock, err := sqlmock.New()
-	require.NoError(t, err)
-
-	report := NewReport(task)
-	createTableSQL1 := "create table `test`.`tbl`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo1, err := dbutil.GetTableInfoBySQL(createTableSQL1, parser.New())
-	require.NoError(t, err)
-	createTableSQL2 := "create table `atest`.`atbl`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo2, err := dbutil.GetTableInfoBySQL(createTableSQL2, parser.New())
-	require.NoError(t, err)
-
-	tableDiffs := []*common.TableDiff{
-		{
-			Schema:    "test",
-			Table:     "tbl",
-			Info:      tableInfo1,
-			Collation: "[123]",
-		},
-		{
-			Schema:    "atest",
-			Table:     "atbl",
-			Info:      tableInfo2,
-			Collation: "[123]",
-		},
-		{
-			Schema:    "ctest",
-			Table:     "atbl",
-			Info:      tableInfo2,
-			Collation: "[123]",
-		},
-		{
-			Schema:    "dtest",
-			Table:     "atbl",
-			Info:      tableInfo2,
-			Collation: "[123]",
-		},
-	}
-	configs := []*ReportConfig{
-		{
-			Host: "127.0.0.1",
-			Port: 3306,
-			User: "root",
-		},
-		{
-			Host: "127.0.0.1",
-			Port: 3307,
-			User: "root",
-		},
-		{
-			Host: "127.0.0.1",
-			Port: 4000,
-			User: "root",
-		},
-	}
-
-	configsBytes := make([][]byte, 3)
-	for i := 0; i < 3; i++ {
-		buf := new(bytes.Buffer)
-		err := toml.NewEncoder(buf).Encode(configs[i])
-		require.NoError(t, err)
-		configsBytes[i] = buf.Bytes()
-	}
-	report.Init(tableDiffs, configsBytes[:2], configsBytes[2])
-
-	// Test CalculateTotal
-	mock.ExpectQuery("select sum.*").WillReturnRows(sqlmock.NewRows([]string{"data"}).AddRow("123"))
-	mock.ExpectQuery("select sum.*where table_schema=.*").WillReturnRows(sqlmock.NewRows([]string{"data"}).AddRow("456"))
-	report.CalculateTotalSize(ctx, db)
-
-	// Test Table Report
-	report.SetTableStructCheckResult("test", "tbl", true, false, common.AllTableExistFlag)
-	report.SetTableDataCheckResult("test", "tbl", true, 100, 200, 222, 222, &chunk.ChunkID{1, 1, 1, 1, 2})
-	report.SetTableMeetError("test", "tbl", errors.New("eeee"))
-
-	new_report := NewReport(task)
-	new_report.LoadReport(report)
-
-	require.Equal(t, new_report.TotalSize, int64(579))
-	result, ok := new_report.TableResults["test"]["tbl"]
-	require.True(t, ok)
-	require.Equal(t, result.MeetError.Error(), "eeee")
-	require.True(t, result.DataEqual)
-	require.True(t, result.StructEqual)
-
-	require.Equal(t, new_report.getSortedTables(), [][]string{{"`atest`.`atbl`", "0", "0"}, {"`ctest`.`atbl`", "0", "0"}, {"`dtest`.`atbl`", "0", "0"}, {"`test`.`tbl`", "222", "222"}})
-	require.Equal(t, new_report.getDiffRows(), [][]string{})
-
-	new_report.SetTableStructCheckResult("atest", "atbl", true, false, common.AllTableExistFlag)
-	new_report.SetTableDataCheckResult("atest", "atbl", false, 111, 222, 333, 333, &chunk.ChunkID{1, 1, 1, 1, 2})
-	require.Equal(t, new_report.getSortedTables(), [][]string{{"`ctest`.`atbl`", "0", "0"}, {"`dtest`.`atbl`", "0", "0"}, {"`test`.`tbl`", "222", "222"}})
-	require.Equal(t, new_report.getDiffRows(), [][]string{{"`atest`.`atbl`", "succeed", "true", "+111/-222", "333", "333"}})
-
-	new_report.SetTableStructCheckResult("atest", "atbl", false, false, common.AllTableExistFlag)
-	require.Equal(t, new_report.getSortedTables(), [][]string{{"`ctest`.`atbl`", "0", "0"}, {"`dtest`.`atbl`", "0", "0"}, {"`test`.`tbl`", "222", "222"}})
-	require.Equal(t, new_report.getDiffRows(), [][]string{{"`atest`.`atbl`", "succeed", "false", "+111/-222", "333", "333"}})
-
-	new_report.SetTableStructCheckResult("ctest", "atbl", false, true, common.AllTableExistFlag)
-
-	new_report.SetTableStructCheckResult("dtest", "atbl", false, true, common.DownstreamTableLackFlag)
-	new_report.MarkFixSQLGenerated()
-
-	buf := new(bytes.Buffer)
-	new_report.Print(buf)
-	info := buf.String()
-	require.Contains(t, info, "The structure of `atest`.`atbl` is not equal\n")
-	require.Contains(t, info, "The data of `atest`.`atbl` is not equal\n")
-	require.Contains(t, info, "The structure of `ctest`.`atbl` is not equal, and data-check is skipped\n")
-	require.Contains(t, info, "The data of `dtest`.`atbl` does not exist in downstream database\n")
-	require.Contains(t, info, "\n"+
-		"The rest of tables are all equal.\n\n"+
-		"A total of 0 tables have been compared, 0 tables finished, 0 tables failed, 0 tables skipped.\n"+
-		"The patch file has been generated in \n\t'output_dir/123456/fix-on-tidb1/'\n"+
-		"You can view the comparison details through 'output_dir/sync_diff.log'\n")
+func checked(r *Report, name string, structure, data bool, index int) {
+	r.SetTableStructCheckResult("test", name, structure, false, common.AllTableExistFlag)
+	r.SetTableDataCheckResult("test", name, data, 0, 0, 10, 10, &chunk.ChunkID{TableIndex: index})
 }
 
-func TestCalculateTotal(t *testing.T) {
-	ctx := context.Background()
+func TestSummaryIndependentStatuses(t *testing.T) {
+	r := testReport(t, "both_equal", "data_diff", "struct_diff", "both_diff", "skip_data", "missing_up", "missing_down", "error", "unchecked")
+	checked(r, "both_equal", true, true, 0)
+	checked(r, "data_diff", true, false, 1)
+	checked(r, "struct_diff", false, true, 2)
+	checked(r, "both_diff", false, false, 3)
+	r.SetTableStructCheckResult("test", "skip_data", false, true, common.AllTableExistFlag)
+	r.SetTableStructCheckResult("test", "missing_up", false, true, common.UpstreamTableLackFlag)
+	r.SetTableStructCheckResult("test", "missing_down", false, true, common.DownstreamTableLackFlag)
+	checked(r, "error", true, true, 7)
+	r.SetTableMeetError("test", "error", errors.New("query timed out"))
+	require.NoError(t, r.CommitSummary())
+	require.EqualValues(t, 1, r.PassNum)
+	require.EqualValues(t, 4, r.FailedNum)
+	require.EqualValues(t, 2, r.SkippedNum)
+	require.EqualValues(t, 1, r.ErrorNum)
+	require.EqualValues(t, 1, r.UncheckedNum)
+	require.Equal(t, Error, r.Result)
 
-	db, mock, err := sqlmock.New()
+	expected := map[string][]string{
+		"both_equal":   {Pass, "equal", "equal"},
+		"data_diff":    {Fail, "equal", "different"},
+		"struct_diff":  {Fail, "different", "equal"},
+		"both_diff":    {Fail, "different", "different"},
+		"skip_data":    {Fail, "different", "skipped"},
+		"missing_up":   {"skipped", "missing", "skipped"},
+		"missing_down": {"skipped", "missing", "skipped"},
+		"error":        {Error, "equal", "error"},
+		"unchecked":    {"not_checked", "not_checked", "not_checked"},
+	}
+	raw, err := os.ReadFile(filepath.Join(r.task.OutputDir, "summary.txt"))
 	require.NoError(t, err)
-
-	report := NewReport(task)
-	createTableSQL := "create table `test`.`tbl`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo, err := dbutil.GetTableInfoBySQL(createTableSQL, parser.New())
-	require.NoError(t, err)
-
-	tableDiffs := []*common.TableDiff{
-		{
-			Schema:    "test",
-			Table:     "tbl",
-			Info:      tableInfo,
-			Collation: "[123]",
-		},
+	text := string(raw)
+	for name, statuses := range expected {
+		// Verify the actual generated file, independently of internal row helpers.
+		var actual []string
+		for _, line := range strings.Split(text, "\n") {
+			cells := strings.Split(line, "|")
+			if len(cells) == 9 && strings.TrimSpace(cells[1]) == "`test`.`"+name+"`" {
+				actual = []string{strings.TrimSpace(cells[2]), strings.TrimSpace(cells[3]), strings.TrimSpace(cells[4])}
+				break
+			}
+		}
+		require.Equal(t, statuses, actual, name)
 	}
-	configs := []*ReportConfig{
-		{
-			Host: "127.0.0.1",
-			Port: 3306,
-			User: "root",
-		},
-		{
-			Host: "127.0.0.1",
-			Port: 3307,
-			User: "root",
-		},
-		{
-			Host: "127.0.0.1",
-			Port: 4000,
-			User: "root",
-		},
+	require.Contains(t, text, "Structure equal: 3; 数据一致 / Data equal: 2")
+	require.Contains(t, text, "missing upstream")
+	require.Contains(t, text, "missing downstream")
+	require.Contains(t, text, "query timed out")
+	require.NotContains(t, text, "succeed")
+	rows := r.tableRows()
+	for i := 1; i < len(rows); i++ {
+		require.Less(t, rows[i-1][0], rows[i][0])
 	}
-
-	configsBytes := make([][]byte, 3)
-	for i := 0; i < 3; i++ {
-		buf := new(bytes.Buffer)
-		err := toml.NewEncoder(buf).Encode(configs[i])
-		require.NoError(t, err)
-		configsBytes[i] = buf.Bytes()
-	}
-	report.Init(tableDiffs, configsBytes[:2], configsBytes[2])
-
-	// Normal
-	mock.ExpectQuery("select sum.*").WillReturnRows(sqlmock.NewRows([]string{"data"}).AddRow("123"))
-	report.CalculateTotalSize(ctx, db)
-	require.Equal(t, report.TotalSize, int64(123))
 }
 
-func TestPrint(t *testing.T) {
-	report := NewReport(task)
-	createTableSQL := "create table `test`.`tbl`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo, err := dbutil.GetTableInfoBySQL(createTableSQL, parser.New())
-	require.NoError(t, err)
-
-	tableDiffs := []*common.TableDiff{
-		{
-			Schema:    "test",
-			Table:     "tbl",
-			Info:      tableInfo,
-			Collation: "[123]",
-		},
-		{
-			Schema:    "test",
-			Table:     "tbl1",
-			Info:      tableInfo,
-			Collation: "[123]",
-		},
+func TestCheckModes(t *testing.T) {
+	for _, mode := range []struct {
+		name                 string
+		structOnly, dataOnly bool
+		structure, data      string
+	}{
+		{"structure", true, false, "equal", "skipped"},
+		{"data", false, true, "skipped", "equal"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			r := testReport(t, "tbl")
+			r.SetCheckMode(mode.structOnly, mode.dataOnly)
+			if mode.structOnly {
+				r.SetTableStructCheckResult("test", "tbl", true, false, 0)
+			}
+			if mode.dataOnly {
+				r.SetTableDataCheckResult("test", "tbl", true, 0, 0, 2, 2, &chunk.ChunkID{})
+			}
+			require.NoError(t, r.CommitSummary())
+			require.Equal(t, Pass, r.Result)
+			require.Equal(t, []string{Pass, mode.structure, mode.data}, r.tableRows()[0][1:4])
+		})
 	}
-	configs := []*ReportConfig{
-		{
-			Host: "127.0.0.1",
-			Port: 3306,
-			User: "root",
-		},
-		{
-			Host: "127.0.0.1",
-			Port: 3307,
-			User: "root",
-		},
-		{
-			Host: "127.0.0.1",
-			Port: 4000,
-			User: "root",
-		},
-	}
-
-	configsBytes := make([][]byte, 3)
-	for i := 0; i < 3; i++ {
-		buf := new(bytes.Buffer)
-		err := toml.NewEncoder(buf).Encode(configs[i])
-		require.NoError(t, err)
-		configsBytes[i] = buf.Bytes()
-	}
-	report.Init(tableDiffs, configsBytes[:2], configsBytes[2])
-
-	var buf *bytes.Buffer
-	// All Pass
-	report.SetTableStructCheckResult("test", "tbl", true, false, common.AllTableExistFlag)
-	report.SetTableDataCheckResult("test", "tbl", true, 0, 0, 22, 22, &chunk.ChunkID{0, 0, 0, 0, 1})
-	buf = new(bytes.Buffer)
-	report.Print(buf)
-	require.Equal(t, buf.String(), "A total of 0 table have been compared and all are equal.\n"+
-		"You can view the comparison details through 'output_dir/sync_diff.log'\n")
-
-	// Error
-	report.SetTableMeetError("test", "tbl1", errors.New("123"))
-	report.SetTableStructCheckResult("test", "tbl1", false, false, common.AllTableExistFlag)
-	buf = new(bytes.Buffer)
-	report.Print(buf)
-	require.Equal(t, buf.String(), "Error in comparison process:\n"+
-		"123 error occured in `test`.`tbl1`\n"+
-		"You can view the comparison details through 'output_dir/sync_diff.log'\n")
 }
 
-func TestPrintFixSQLDisabled(t *testing.T) {
-	report := NewReport(task, false)
-	createTableSQL := "create table `test`.`tbl`(`a` int, primary key(`a`))"
-	tableInfo, err := dbutil.GetTableInfoBySQL(createTableSQL, parser.New())
-	require.NoError(t, err)
-	report.Init([]*common.TableDiff{{Schema: "test", Table: "tbl", Info: tableInfo}}, nil, nil)
-	report.SetTableStructCheckResult("test", "tbl", false, false, common.AllTableExistFlag)
-	buf := new(bytes.Buffer)
-	require.NoError(t, report.Print(buf))
-	output := buf.String()
-	require.Contains(t, output, "Fix SQL export is disabled; differences were recorded without exporting SQL.")
-	require.NotContains(t, output, "The patch file has been generated")
-}
-
-func TestChecksumOnlyMismatchReportsUnknownRows(t *testing.T) {
-	report := NewReport(task, true)
-	createTableSQL := "create table `test`.`nokey`(`v` varchar(10))"
-	tableInfo, err := dbutil.GetTableInfoBySQL(createTableSQL, parser.New())
-	require.NoError(t, err)
-	report.Init([]*common.TableDiff{{Schema: "test", Table: "nokey", Info: tableInfo}}, nil, nil)
-	report.SetTableChecksumOnlyResult("test", "nokey", false, 7, 9, &chunk.ChunkID{TableIndex: 0, ChunkIndex: 0, ChunkCnt: 1})
-	result := report.TableResults["test"]["nokey"]
-	require.True(t, result.RowsUnknown)
-	require.False(t, result.DataEqual)
-	require.Contains(t, report.getDiffRows()[0], "unknown/unknown")
-	buf := new(bytes.Buffer)
-	require.NoError(t, report.Print(buf))
+func TestPrintResultsAndFixSQL(t *testing.T) {
+	r := testReport(t, "tbl")
+	checked(r, "tbl", true, true, 0)
+	var buf bytes.Buffer
+	require.NoError(t, r.Print(&buf))
+	require.Contains(t, buf.String(), "1 passed, 0 failed")
+	require.Contains(t, buf.String(), "summary.txt")
+	r.SetTableMeetError("test", "tbl", errors.New("checksum failed"))
+	buf.Reset()
+	require.NoError(t, r.Print(&buf))
+	require.Contains(t, buf.String(), "structure=equal, data=error (checksum failed)")
+	require.Contains(t, buf.String(), "0 passed, 0 failed, 0 skipped, 1 errors")
+	require.NotContains(t, buf.String(), "all are equal")
 	require.Contains(t, buf.String(), "No patch file was generated.")
-	require.Contains(t, buf.String(), "Checksum-only differences have no row details and cannot generate fix SQL.")
+	r.MarkFixSQLGenerated()
+	buf.Reset()
+	require.NoError(t, r.Print(&buf))
+	require.Contains(t, buf.String(), "The patch file has been generated")
+	r.exportFixSQL = false
+	buf.Reset()
+	require.NoError(t, r.Print(&buf))
+	require.Contains(t, buf.String(), "Fix SQL export is disabled")
 	require.NotContains(t, buf.String(), "The patch file has been generated")
 }
 
-func TestGetSnapshot(t *testing.T) {
-	report := NewReport(task)
-	createTableSQL1 := "create table `test`.`tbl`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo1, err := dbutil.GetTableInfoBySQL(createTableSQL1, parser.New())
+func TestChecksumOnlyMismatchReportsUnknownRows(t *testing.T) {
+	r := testReport(t, "nokey")
+	r.SetTableStructCheckResult("test", "nokey", true, false, 0)
+	r.SetTableChecksumOnlyResult("test", "nokey", false, 7, 9, &chunk.ChunkID{})
+	require.True(t, r.TableResults["test"]["nokey"].RowsUnknown)
+	require.Contains(t, r.getDiffRows()[0], "unknown/unknown")
+	require.NoError(t, r.CommitSummary())
+	raw, err := os.ReadFile(filepath.Join(r.task.OutputDir, "summary.txt"))
 	require.NoError(t, err)
-	createTableSQL2 := "create table `atest`.`tbl`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo2, err := dbutil.GetTableInfoBySQL(createTableSQL2, parser.New())
-	require.NoError(t, err)
-	createTableSQL3 := "create table `xtest`.`tbl`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo3, err := dbutil.GetTableInfoBySQL(createTableSQL3, parser.New())
-	require.NoError(t, err)
-
-	tableDiffs := []*common.TableDiff{
-		{
-			Schema:    "test",
-			Table:     "tbl",
-			Info:      tableInfo1,
-			Collation: "[123]",
-		}, {
-			Schema:    "atest",
-			Table:     "tbl",
-			Info:      tableInfo2,
-			Collation: "[123]",
-		}, {
-			Schema:    "xtest",
-			Table:     "tbl",
-			Info:      tableInfo3,
-			Collation: "[123]",
-		},
-	}
-	configs := []*ReportConfig{
-		{
-			Host: "127.0.0.1",
-			Port: 3306,
-			User: "root",
-		},
-		{
-			Host: "127.0.0.1",
-			Port: 3307,
-			User: "root",
-		},
-		{
-			Host: "127.0.0.1",
-			Port: 4000,
-			User: "root",
-		},
-	}
-
-	configsBytes := make([][]byte, 3)
-	for i := 0; i < 3; i++ {
-		buf := new(bytes.Buffer)
-		err := toml.NewEncoder(buf).Encode(configs[i])
-		require.NoError(t, err)
-		configsBytes[i] = buf.Bytes()
-	}
-	report.Init(tableDiffs, configsBytes[:2], configsBytes[2])
-
-	report.SetTableStructCheckResult("test", "tbl", true, false, common.AllTableExistFlag)
-	report.SetTableDataCheckResult("test", "tbl", false, 100, 100, 200, 300, &chunk.ChunkID{0, 0, 0, 1, 10})
-	report.SetTableDataCheckResult("test", "tbl", true, 0, 0, 300, 300, &chunk.ChunkID{0, 0, 0, 3, 10})
-	report.SetTableDataCheckResult("test", "tbl", false, 200, 200, 400, 500, &chunk.ChunkID{0, 0, 0, 3, 10})
-
-	report.SetTableStructCheckResult("atest", "tbl", true, false, common.AllTableExistFlag)
-	report.SetTableDataCheckResult("atest", "tbl", false, 100, 100, 500, 600, &chunk.ChunkID{0, 0, 0, 0, 10})
-	report.SetTableDataCheckResult("atest", "tbl", true, 0, 0, 600, 600, &chunk.ChunkID{0, 0, 0, 3, 10})
-	report.SetTableDataCheckResult("atest", "tbl", false, 200, 200, 700, 800, &chunk.ChunkID{0, 0, 0, 3, 10})
-
-	report.SetTableStructCheckResult("xtest", "tbl", true, false, common.AllTableExistFlag)
-	report.SetTableDataCheckResult("xtest", "tbl", false, 100, 100, 800, 900, &chunk.ChunkID{0, 0, 0, 0, 10})
-	report.SetTableDataCheckResult("xtest", "tbl", true, 0, 0, 900, 900, &chunk.ChunkID{0, 0, 0, 1, 10})
-	report.SetTableDataCheckResult("xtest", "tbl", false, 200, 200, 1000, 1100, &chunk.ChunkID{0, 0, 0, 3, 10})
-
-	report_snap, err := report.GetSnapshot(&chunk.ChunkID{0, 0, 0, 1, 10}, "test", "tbl")
-	require.NoError(t, err)
-	require.Equal(t, report_snap.TotalSize, report.TotalSize)
-	require.Equal(t, report_snap.Result, report.Result)
-	for key, value := range report.TableResults {
-		if _, ok := report_snap.TableResults[key]; !ok {
-			v, ok := value["tbl"]
-			require.True(t, ok)
-			require.Equal(t, v.Schema, "atest")
-			continue
-		}
-
-		if _, ok := report_snap.TableResults[key]["tbl"]; !ok {
-			require.Equal(t, key, "atest")
-			continue
-		}
-
-		v1 := value["tbl"]
-		v2 := report_snap.TableResults[key]["tbl"]
-		require.Equal(t, v1.Schema, v2.Schema)
-		require.Equal(t, v1.Table, v2.Table)
-		require.Equal(t, v1.StructEqual, v2.StructEqual)
-		require.Equal(t, v1.DataEqual, v2.DataEqual)
-		require.Equal(t, v1.MeetError, v2.MeetError)
-
-		chunkMap1 := v1.ChunkMap
-		chunkMap2 := v2.ChunkMap
-		for id, r1 := range chunkMap1 {
-			sid := new(chunk.ChunkID)
-			if _, ok := chunkMap2[id]; !ok {
-				require.NoError(t, sid.FromString(id))
-				require.Equal(t, sid.Compare(&chunk.ChunkID{0, 0, 0, 3, 10}), 0)
-				continue
-			}
-			require.NoError(t, sid.FromString(id))
-			require.True(t, sid.Compare(&chunk.ChunkID{0, 0, 0, 1, 10}) <= 0)
-			r2 := chunkMap2[id]
-			require.Equal(t, r1.RowsAdd, r2.RowsAdd)
-			require.Equal(t, r1.RowsDelete, r2.RowsDelete)
-		}
-
-	}
+	require.Contains(t, string(raw), "unknown/unknown")
+	var buf bytes.Buffer
+	require.NoError(t, r.Print(&buf))
+	require.Contains(t, buf.String(), "No patch file was generated.")
+	require.Contains(t, buf.String(), "Checksum-only differences have no row details and cannot generate fix SQL.")
 }
 
-func TestCommitSummary(t *testing.T) {
-	outputDir := "./"
-	report := NewReport(&config.TaskConfig{OutputDir: outputDir, FixDir: task.FixDir})
-	createTableSQL1 := "create table `test`.`tbl`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo1, err := dbutil.GetTableInfoBySQL(createTableSQL1, parser.New())
+func TestSnapshotPreservesCompletedTablesAndFiltersFutureChunks(t *testing.T) {
+	// Input order deliberately differs from schema/table-name ordering.
+	r := testReport(t, "z_first", "a_current", "m_future", "missing")
+	checked(r, "z_first", true, false, 0)
+	r.SetTableStructCheckResult("test", "a_current", true, false, 0)
+	r.SetTableDataCheckResult("test", "a_current", true, 0, 0, 20, 20, &chunk.ChunkID{TableIndex: 1, ChunkIndex: 0})
+	r.SetTableDataCheckResult("test", "a_current", false, 2, 3, 30, 31, &chunk.ChunkID{TableIndex: 1, ChunkIndex: 2})
+	checked(r, "m_future", true, false, 2)
+	r.SetTableStructCheckResult("test", "missing", false, true, common.UpstreamTableLackFlag)
+	r.MarkFixSQLGenerated()
+	snapshot, err := r.GetSnapshot(&chunk.ChunkID{TableIndex: 1, ChunkIndex: 0}, "test", "a_current")
 	require.NoError(t, err)
-	createTableSQL2 := "create table `atest`.`tbl`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo2, err := dbutil.GetTableInfoBySQL(createTableSQL2, parser.New())
+	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
-	createTableSQL3 := "create table `xtest`.`tbl`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo3, err := dbutil.GetTableInfoBySQL(createTableSQL3, parser.New())
+	var decoded Report
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	restored := testReport(t, "z_first", "a_current", "m_future", "missing")
+	restored.LoadReport(&decoded)
+	require.True(t, restored.FixSQLGenerated)
+	require.Equal(t, []string{Fail, "equal", "different"}, restored.tableRows()[3][1:4])
+	current := restored.TableResults["test"]["a_current"]
+	require.True(t, current.DataEqual)
+	require.True(t, current.DataChecked)
+	require.EqualValues(t, 20, current.UpCount)
+	require.EqualValues(t, 20, current.DownCount)
+	require.Len(t, current.ChunkMap, 1)
+	future := restored.TableResults["test"]["m_future"]
+	require.False(t, future.DataChecked)
+	require.Zero(t, future.UpCount)
+	require.True(t, restored.TableResults["test"]["missing"].DataSkip)
+	require.Equal(t, common.UpstreamTableLackFlag, restored.TableResults["test"]["missing"].TableLack)
+	// Reprocessing excluded chunks restores the exact counts, without double counting.
+	restored.SetTableDataCheckResult("test", "a_current", false, 2, 3, 30, 31, &chunk.ChunkID{TableIndex: 1, ChunkIndex: 2})
+	require.EqualValues(t, 50, current.UpCount)
+	require.EqualValues(t, 51, current.DownCount)
+}
+
+func TestSnapshotPersistsErrorsAndUnknownRows(t *testing.T) {
+	r := testReport(t, "error", "nokey")
+	r.SetTableStructCheckResult("test", "error", true, false, 0)
+	r.SetTableMeetError("test", "error", errors.New("read failed"))
+	r.SetTableDataCheckResult("test", "error", false, 0, 0, 0, 0, &chunk.ChunkID{})
+	r.SetTableStructCheckResult("test", "nokey", true, false, 0)
+	r.SetTableChecksumOnlyResult("test", "nokey", false, 4, 5, &chunk.ChunkID{TableIndex: 1})
+	snapshot, err := r.GetSnapshot(&chunk.ChunkID{TableIndex: 1}, "test", "nokey")
 	require.NoError(t, err)
-	createTableSQL4 := "create table `xtest`.`tb1`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo4, err := dbutil.GetTableInfoBySQL(createTableSQL4, parser.New())
+	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
-	tableDiffs := []*common.TableDiff{
-		{
-			Schema:    "test",
-			Table:     "tbl",
-			Info:      tableInfo1,
-			Collation: "[123]",
-		}, {
-			Schema:    "atest",
-			Table:     "tbl",
-			Info:      tableInfo2,
-			Collation: "[123]",
-		}, {
-			Schema:    "xtest",
-			Table:     "tbl",
-			Info:      tableInfo3,
-			Collation: "[123]",
-		}, {
-			Schema:    "ytest",
-			Table:     "tbl",
-			Info:      tableInfo3,
-			Collation: "[123]",
-		}, {
-			Schema:    "xtest",
-			Table:     "tb1",
-			Info:      tableInfo4,
-			Collation: "[123]",
-		}, {
-			Schema:    "xtest",
-			Table:     "tb2",
-			Info:      tableInfo4,
-			Collation: "[123]",
-		},
-	}
-	configs := []*ReportConfig{
-		{
-			Host: "127.0.0.1",
-			Port: 3306,
-			User: "root",
-		},
-		{
-			Host: "127.0.0.1",
-			Port: 3307,
-			User: "root",
-		},
-		{
-			Host: "127.0.0.1",
-			Port: 4000,
-			User: "root",
-		},
-	}
+	var decoded Report
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	restored := testReport(t, "error", "nokey")
+	restored.LoadReport(&decoded)
+	require.EqualError(t, restored.TableResults["test"]["error"].MeetError, "read failed")
+	require.True(t, restored.TableResults["test"]["nokey"].RowsUnknown)
+	require.NoError(t, restored.CommitSummary())
+	require.Equal(t, Error, restored.Result)
+}
 
-	configsBytes := make([][]byte, 3)
-	for i := 0; i < 3; i++ {
-		buf := new(bytes.Buffer)
-		err := toml.NewEncoder(buf).Encode(configs[i])
-		require.NoError(t, err)
-		configsBytes[i] = buf.Bytes()
-	}
-	report.Init(tableDiffs, configsBytes[:2], configsBytes[2])
+func TestSetTableMeetErrorBeforeInitialization(t *testing.T) {
+	r := NewReport(&config.TaskConfig{OutputDir: t.TempDir()})
+	r.SetTableMeetError("s", "first", errors.New("first error"))
+	r.SetTableMeetError("s", "second", errors.New("second error"))
+	require.NoError(t, r.CommitSummary())
+	require.EqualValues(t, 2, r.ErrorNum)
+	require.Equal(t, Error, r.Result)
+}
 
-	report.SetTableStructCheckResult("test", "tbl", true, false, common.AllTableExistFlag)
-	report.SetTableDataCheckResult("test", "tbl", true, 100, 200, 400, 400, &chunk.ChunkID{0, 0, 0, 1, 10})
-
-	report.SetTableStructCheckResult("atest", "tbl", true, false, common.AllTableExistFlag)
-	report.SetTableDataCheckResult("atest", "tbl", false, 100, 200, 500, 600, &chunk.ChunkID{0, 0, 0, 2, 10})
-
-	report.SetTableStructCheckResult("xtest", "tbl", false, false, common.AllTableExistFlag)
-	report.SetTableDataCheckResult("xtest", "tbl", false, 100, 200, 600, 700, &chunk.ChunkID{0, 0, 0, 3, 10})
-
-	report.SetTableStructCheckResult("xtest", "tb1", false, true, common.UpstreamTableLackFlag)
-	report.SetTableDataCheckResult("xtest", "tb1", false, 0, 200, 0, 200, &chunk.ChunkID{0, 0, 0, 4, 10})
-
-	report.SetTableStructCheckResult("xtest", "tb2", false, true, common.DownstreamTableLackFlag)
-	report.SetTableDataCheckResult("xtest", "tb2", false, 100, 0, 100, 0, &chunk.ChunkID{0, 0, 0, 5, 10})
-
-	err = report.CommitSummary()
+func TestCalculateTotalSize(t *testing.T) {
+	r := testReport(t, "tbl")
+	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	filename := path.Join(outputDir, "summary.txt")
-	file, err := os.Open(filename)
-	require.NoError(t, err)
+	defer db.Close()
+	mock.ExpectQuery("select sum.*").WillReturnRows(sqlmock.NewRows([]string{"data"}).AddRow("123"))
+	r.CalculateTotalSize(context.Background(), db)
+	require.EqualValues(t, 123, r.TotalSize)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
 
-	p := make([]byte, 2048)
-	file.Read(p)
-	str := string(p)
-	require.Contains(t, str, "Summary\n\n\n\n"+
-		"Source Database\n\n\n\n"+
-		"host = \"127.0.0.1\"\n"+
-		"port = 3306\n"+
-		"user = \"root\"\n\n"+
-		"host = \"127.0.0.1\"\n"+
-		"port = 3307\n"+
-		"user = \"root\"\n\n"+
-		"Target Databases\n\n\n\n"+
-		"host = \"127.0.0.1\"\n"+
-		"port = 4000\n"+
-		"user = \"root\"\n\n"+
-		"Comparison Result\n\n\n\n"+
-		"The table structure and data in following tables are equivalent\n\n"+
-		"+---------------+---------+-----------+\n"+
-		"|     TABLE     | UPCOUNT | DOWNCOUNT |\n"+
-		"+---------------+---------+-----------+\n"+
-		"| `test`.`tbl`  |     400 |       400 |\n"+
-		"| `ytest`.`tbl` |       0 |         0 |\n"+
-		"+---------------+---------+-----------+\n\n\n"+
-		"The following tables contains inconsistent data\n\n"+
-		"+---------------+---------+--------------------+----------------+---------+-----------+\n"+
-		"|     TABLE     | RESULT  | STRUCTURE EQUALITY | DATA DIFF ROWS | UPCOUNT | DOWNCOUNT |\n"+
-		"+---------------+---------+--------------------+----------------+---------+-----------+\n")
-	require.Contains(t, str,
-		"| `atest`.`tbl` | succeed | true               | +100/-200      |     500 |       600 |\n")
-	require.Contains(t, str,
-		"| `xtest`.`tbl` | succeed | false              | +100/-200      |     600 |       700 |\n")
-	require.Contains(t, str,
-		"| `xtest`.`tb1` | skipped | false              | +0/-200        |       0 |       200 |\n")
-	require.Contains(t, str,
-		"| `xtest`.`tb2` | skipped | false              | +100/-0        |     100 |         0 |\n")
-
-	file.Close()
-	err = os.Remove(filename)
-	require.NoError(t, err)
+func TestCommitSummaryWriteError(t *testing.T) {
+	r := testReport(t, "tbl")
+	r.task.OutputDir = filepath.Join(r.task.OutputDir, "missing")
+	require.Error(t, r.CommitSummary())
 }

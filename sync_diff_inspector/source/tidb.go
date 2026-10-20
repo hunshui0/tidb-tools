@@ -194,7 +194,7 @@ func (s *TiDBSource) GetSourceStructInfo(ctx context.Context, tableIndex int) ([
 	tableInfos := make([]*model.TableInfo, 1)
 	tableDiff := s.GetTables()[tableIndex]
 	source := getMatchSource(s.sourceTableMap, tableDiff)
-	tableInfos[0], err = dbutil.GetTableInfoWithVersion(ctx, s.GetDB(), source.OriginSchema, source.OriginTable, s.version)
+	tableInfos[0], err = utils.GetTableInfoWithRetry(ctx, s.GetDB(), source.OriginSchema, source.OriginTable, s.version)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

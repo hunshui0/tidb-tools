@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb-tools/pkg/dbutil"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/chunk"
-	"github.com/pingcap/tidb-tools/sync_diff_inspector/progress"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/source/common"
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/utils"
 	"github.com/pingcap/tidb/pkg/meta/model"
@@ -82,7 +81,6 @@ func NewBucketIteratorWithCheckpoint(ctx context.Context, progressID string, tab
 	}
 
 	// Let the progress bar begins to record the table.
-	progress.StartTable(bs.progressID, 0, false)
 	go bs.produceChunks(bctx, startRange)
 
 	return bs, nil
@@ -229,7 +227,6 @@ func (s *BucketIterator) splitChunkForBucket(ctx context.Context, firstBucketID,
 			return
 		}
 		chunk.InitChunks(chunks, chunk.Bucket, firstBucketID, lastBucketID, beginIndex, s.table.Collation, s.table.Range, bucketChunkCnt)
-		progress.UpdateTotal(s.progressID, len(chunks), false)
 		s.chunksCh <- chunks
 	})
 }
@@ -237,7 +234,6 @@ func (s *BucketIterator) splitChunkForBucket(ctx context.Context, firstBucketID,
 func (s *BucketIterator) produceChunks(ctx context.Context, startRange *RangeInfo) {
 	defer func() {
 		s.wg.Wait()
-		progress.UpdateTotal(s.progressID, 0, true)
 		close(s.chunksCh)
 	}()
 	var (

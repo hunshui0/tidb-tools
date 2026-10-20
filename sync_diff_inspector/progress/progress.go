@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/pingcap/tidb-tools/sync_diff_inspector/source/common"
+	"golang.org/x/term"
 )
 
 type TableProgressPrinter struct {
@@ -29,11 +30,12 @@ type TableProgressPrinter struct {
 	tableFailList *list.List
 	tableMap      map[string]*list.Element
 	output        io.Writer
-	lines         int
+	lastProgress  string
+	lineVisible   bool
+	terminalWidth func() int // optional override for terminal rendering tests
 
-	progressTableNums int
-	finishTableNums   int
-	tableNums         int
+	finishTableNums int
+	tableNums       int
 
 	progress     int
 	total        int
@@ -59,6 +61,7 @@ const (
 	TABLE_STATE_RESULT_MASK                    table_state_t = 0xff0
 	TABLE_STATE_NOT_EXSIT_UPSTREAM             table_state_t = 0x100
 	TABLE_STATE_NOT_EXSIT_DOWNSTREAM           table_state_t = 0x200
+	TABLE_STATE_RESULT_SKIP_DATA               table_state_t = 0x400
 )
 
 type TableProgress struct {
@@ -90,15 +93,17 @@ type Operator struct {
 }
 
 func NewTableProgressPrinter(tableNums int, finishTableNums int, exportFixSQL ...bool) *TableProgressPrinter {
+	return newTableProgressPrinter(tableNums, finishTableNums, os.Stdout, exportFixSQL...)
+}
+
+func newTableProgressPrinter(tableNums, finishTableNums int, output io.Writer, exportFixSQL ...bool) *TableProgressPrinter {
 	tpp := &TableProgressPrinter{
 		tableList:     list.New(),
 		tableFailList: list.New(),
 		tableMap:      make(map[string]*list.Element),
-		lines:         0,
 
-		progressTableNums: 0,
-		finishTableNums:   finishTableNums,
-		tableNums:         tableNums,
+		finishTableNums: finishTableNums,
+		tableNums:       tableNums,
 
 		progress:     0,
 		total:        0,
@@ -108,8 +113,9 @@ func NewTableProgressPrinter(tableNums int, finishTableNums int, exportFixSQL ..
 		finishCh: make(chan struct{}),
 	}
 	tpp.init()
+	tpp.output = output
+	fmt.Fprintf(tpp.output, "A total of %d tables need to be compared\n", tableNums)
 	go tpp.serve()
-	fmt.Fprintf(tpp.output, "A total of %d tables need to be compared\n\n\n", tableNums)
 	return tpp
 }
 
@@ -117,20 +123,32 @@ func (tpp *TableProgressPrinter) SetOutput(output io.Writer) {
 	tpp.output = output
 }
 
-func (tpp *TableProgressPrinter) Inc(name string) {
-	tpp.optCh <- Operator{
-		optType: PROGRESS_OPT_INC,
-		name:    name,
+func (tpp *TableProgressPrinter) enqueue(opt Operator) {
+	select {
+	case <-tpp.finishCh:
+		return
+	default:
+	}
+	select {
+	case <-tpp.finishCh:
+	case tpp.optCh <- opt:
 	}
 }
 
+func (tpp *TableProgressPrinter) Inc(name string) {
+	tpp.enqueue(Operator{
+		optType: PROGRESS_OPT_INC,
+		name:    name,
+	})
+}
+
 func (tpp *TableProgressPrinter) UpdateTotal(name string, total int, stopUpdate bool) {
-	tpp.optCh <- Operator{
+	tpp.enqueue(Operator{
 		optType:         PROGRESS_OPT_UPDATE,
 		name:            name,
 		total:           total,
 		totalStopUpdate: stopUpdate,
-	}
+	})
 }
 
 func (tpp *TableProgressPrinter) RegisterTable(name string, isFailed bool, isDone bool, isExist int) {
@@ -148,45 +166,45 @@ func (tpp *TableProgressPrinter) RegisterTable(name string, isFailed bool, isDon
 		} else {
 			state = TABLE_STATE_RESULT_FAIL_STRUCTURE_CONTINUE | TABLE_STATE_REGISTER
 		}
+	} else if isDone {
+		state = TABLE_STATE_RESULT_SKIP_DATA | TABLE_STATE_REGISTER
 	} else {
 		state = TABLE_STATE_REGISTER
 	}
-	tpp.optCh <- Operator{
+	tpp.enqueue(Operator{
 		optType: PROGRESS_OPT_REGISTER,
 		name:    name,
 		state:   state,
-	}
+	})
 }
 
 func (tpp *TableProgressPrinter) StartTable(name string, total int, stopUpdate bool) {
-	tpp.optCh <- Operator{
+	tpp.enqueue(Operator{
 		optType:         PROGRESS_OPT_START,
 		name:            name,
 		total:           total,
 		state:           TABLE_STATE_PRESTART,
 		totalStopUpdate: stopUpdate,
-	}
+	})
 }
 
 func (tpp *TableProgressPrinter) FailTable(name string) {
-	tpp.optCh <- Operator{
+	tpp.enqueue(Operator{
 		optType: PROGRESS_OPT_FAIL,
 		name:    name,
 		state:   TABLE_STATE_RESULT_DIFFERENT,
-	}
+	})
 }
 
 func (tpp *TableProgressPrinter) Close() {
-	tpp.optCh <- Operator{
+	tpp.enqueue(Operator{
 		optType: PROGRESS_OPT_CLOSE,
-	}
+	})
 	<-tpp.finishCh
 }
 
 func (tpp *TableProgressPrinter) PrintSummary() {
-	var cleanStr, fixStr string
-	cleanStr = "\x1b[1A\x1b[J"
-	fixStr = "\nSummary:\n\n"
+	fixStr := "\nSummary:\n\n"
 	if tpp.tableFailList.Len() == 0 {
 		fixStr = fmt.Sprintf(
 			"%sA total of %d tables have been compared and all are equal.\nYou can view the comparison details through './output_dir/sync_diff_inspector.log'\n",
@@ -221,19 +239,16 @@ func (tpp *TableProgressPrinter) PrintSummary() {
 		fixStr += "You can view the comparison details through './output_dir/sync_diff_inspector.log'\n"
 	}
 
-	fmt.Fprintf(tpp.output, "%s%s\n", cleanStr, fixStr)
+	fmt.Fprintf(tpp.output, "%s\n", fixStr)
 
 }
 
 func (tpp *TableProgressPrinter) Error(err error) {
-	tpp.optCh <- Operator{
+	tpp.enqueue(Operator{
 		optType: PROGRESS_OPT_ERROR,
-	}
+	})
 	<-tpp.finishCh
-	var cleanStr, fixStr string
-	cleanStr = "\x1b[1A\x1b[J"
-	fixStr = fmt.Sprintf("\nError in comparison process:\n%v\n\nYou can view the comparison details through './output_dir/sync_diff_inspector.log'\n", err)
-	fmt.Fprintf(tpp.output, "%s%s", cleanStr, fixStr)
+	fmt.Fprintf(tpp.output, "\nError in comparison process:\n%v\n\nYou can view the comparison details through './output_dir/sync_diff_inspector.log'\n", err)
 }
 
 func (tpp *TableProgressPrinter) init() {
@@ -246,6 +261,7 @@ func (tpp *TableProgressPrinter) init() {
 
 func (tpp *TableProgressPrinter) serve() {
 	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
 
 	for {
 		select {
@@ -255,23 +271,19 @@ func (tpp *TableProgressPrinter) serve() {
 			switch opt.optType {
 			case PROGRESS_OPT_CLOSE:
 				tpp.flush(false)
-				tpp.finishCh <- struct{}{}
+				tpp.endLine()
+				close(tpp.finishCh)
 				return
 			case PROGRESS_OPT_ERROR:
-				tpp.finishCh <- struct{}{}
+				tpp.endLine()
+				close(tpp.finishCh)
 				return
 			case PROGRESS_OPT_INC:
 				if e, ok := tpp.tableMap[opt.name]; ok {
 					tp := e.Value.(*TableProgress)
 					tp.progress++
 					tpp.progress++
-					if tp.progress >= tp.total && tp.totalStopUpdate {
-						tp.state = (tp.state & TABLE_STATE_RESULT_MASK) | TABLE_STATE_FINISH
-						tpp.progress -= tp.progress
-						tpp.total -= tp.total
-						delete(tpp.tableMap, opt.name)
-						tpp.flush(true)
-					}
+					tpp.finishTable(tp)
 				}
 			case PROGRESS_OPT_REGISTER:
 				if _, ok := tpp.tableMap[opt.name]; !ok {
@@ -302,18 +314,23 @@ func (tpp *TableProgressPrinter) serve() {
 					tp.total = opt.total
 					tp.totalStopUpdate = opt.totalStopUpdate
 				}
-				if e.Value.(*TableProgress).state&TABLE_STATE_RESULT_FAIL_STRUCTURE_DONE == 0 {
+				tp := e.Value.(*TableProgress)
+				if tp.state&(TABLE_STATE_RESULT_FAIL_STRUCTURE_DONE|TABLE_STATE_NOT_EXSIT_UPSTREAM|TABLE_STATE_NOT_EXSIT_DOWNSTREAM|TABLE_STATE_RESULT_SKIP_DATA) == 0 {
 					tpp.total += opt.total
 				} else {
 					delete(tpp.tableMap, opt.name)
 				}
 				tpp.flush(true)
+				if _, ok := tpp.tableMap[opt.name]; ok {
+					tpp.finishTable(tp)
+				}
 			case PROGRESS_OPT_UPDATE:
 				if e, ok := tpp.tableMap[opt.name]; ok {
 					tp := e.Value.(*TableProgress)
 					tpp.total += opt.total
 					tp.total += opt.total
 					tp.totalStopUpdate = opt.totalStopUpdate
+					tpp.finishTable(tp)
 				}
 			case PROGRESS_OPT_FAIL:
 				if e, ok := tpp.tableMap[opt.name]; ok {
@@ -326,24 +343,22 @@ func (tpp *TableProgressPrinter) serve() {
 	}
 }
 
-// flush flush info
-func (tpp *TableProgressPrinter) flush(stateIsChanged bool) {
-	/*
-	 * A total of 15 tables need to be compared
-	 *
-	 * Comparing the table structure of `schema1.table1` ... equivalent
-	 * Comparing the table data of `schema1.table1` ... equivalent
-	 * Comparing the table structure of `schema2.table2` ... equivalent
-	 * Comparing the table data of `schema2.table2` ...
-	 * _____________________________________________________________________________
-	 * Progress [===================>-----------------------------------------] 35%
-	 *
-	 */
+// The producer may finish splitting after the consumer has processed its last
+// chunk. Both Inc and UpdateTotal must therefore check for completion.
+func (tpp *TableProgressPrinter) finishTable(tp *TableProgress) {
+	if tp.totalStopUpdate && tp.progress >= tp.total {
+		tp.state = (tp.state & TABLE_STATE_RESULT_MASK) | TABLE_STATE_FINISH
+		delete(tpp.tableMap, tp.name)
+		tpp.flush(true)
+	}
+}
 
+// flush prints lifecycle messages once and keeps only the progress line live.
+// Moving up a fixed number of lines breaks as soon as the terminal wraps text.
+func (tpp *TableProgressPrinter) flush(stateIsChanged bool) {
+	var messages string
 	if stateIsChanged {
-		var cleanStr, fixStr, dynStr string
-		cleanStr = fmt.Sprintf("\x1b[%dA\x1b[J", tpp.lines)
-		tpp.lines = 2
+		var fixStr, dynStr string
 		/* PRESTART/COMPARING/FINISH OK/DIFFERENT */
 		for p := tpp.tableList.Front(); p != nil; p = p.Next() {
 			tp := p.Value.(*TableProgress)
@@ -356,11 +371,15 @@ func (tpp *TableProgressPrinter) flush(stateIsChanged bool) {
 			switch tp.state & 0xf {
 			case TABLE_STATE_PRESTART:
 				switch tp.state & TABLE_STATE_RESULT_MASK {
+				case TABLE_STATE_RESULT_SKIP_DATA:
+					fixStr += fmt.Sprintf("Comparing the table structure of %s ... equivalent\nComparing the table data of %s ... skipped\n", tp.name, tp.name)
+					preNode := p.Prev()
+					tpp.tableList.Remove(p)
+					p = preNode
+					tpp.finishTableNums++
 				case TABLE_STATE_RESULT_OK:
 					fixStr = fmt.Sprintf("%sComparing the table structure of %s ... equivalent\n", fixStr, tp.name)
 					dynStr = fmt.Sprintf("%sComparing the table data of %s ...\n", dynStr, tp.name)
-					tpp.lines++
-					tpp.progressTableNums++
 					tp.state = TABLE_STATE_COMPARING
 				case TABLE_STATE_NOT_EXSIT_UPSTREAM, TABLE_STATE_NOT_EXSIT_DOWNSTREAM:
 					dynStr = fmt.Sprintf("%sComparing the table data of %s ...skipped\n", dynStr, tp.name)
@@ -380,19 +399,14 @@ func (tpp *TableProgressPrinter) flush(stateIsChanged bool) {
 				case TABLE_STATE_RESULT_FAIL_STRUCTURE_CONTINUE:
 					fixStr = fmt.Sprintf("%sComparing the table structure of %s ... failure\n", fixStr, tp.name)
 					dynStr = fmt.Sprintf("%sComparing the table data of %s ...\n", dynStr, tp.name)
-					tpp.lines++
-					tpp.progressTableNums++
 					tp.state ^= TABLE_STATE_COMPARING | TABLE_STATE_PRESTART
 				case TABLE_STATE_RESULT_FAIL_STRUCTURE_PASS:
 					fixStr = fmt.Sprintf("%sComparing the table structure of %s ... skip\n", fixStr, tp.name)
 					dynStr = fmt.Sprintf("%sComparing the table data of %s ...\n", dynStr, tp.name)
-					tpp.lines++
-					tpp.progressTableNums++
 					tp.state ^= TABLE_STATE_COMPARING | TABLE_STATE_PRESTART
 				}
 			case TABLE_STATE_COMPARING:
-				dynStr = fmt.Sprintf("%sComparing the table data of %s ...\n", dynStr, tp.name)
-				tpp.lines++
+				// Already announced when the table started.
 			case TABLE_STATE_FINISH:
 				if tp.state&TABLE_STATE_RESULT_DIFFERENT == 0 {
 					fixStr = fmt.Sprintf("%sComparing the table data of %s ... equivalent\n", fixStr, tp.name)
@@ -406,32 +420,87 @@ func (tpp *TableProgressPrinter) flush(stateIsChanged bool) {
 				preNode := p.Prev()
 				tpp.tableList.Remove(p)
 				p = preNode
-				tpp.progressTableNums--
 				tpp.finishTableNums++
 			}
 		}
 
-		dynStr = fmt.Sprintf("%s_____________________________________________________________________________\n", dynStr)
-		fmt.Fprintf(tpp.output, "%s%s%s", cleanStr, fixStr, dynStr)
-	} else {
-		fmt.Fprint(tpp.output, "\x1b[1A\x1b[J")
+		messages = fixStr + dynStr
 	}
-	// show bar
-	// 60 '='+'-'
-	var coe float32
-	if tpp.tableNums > 0 {
-		if tpp.total > 0 {
-			coe = float32(tpp.progressTableNums*tpp.progress)/float32(tpp.tableNums*(tpp.total+1)) + float32(tpp.finishTableNums)/float32(tpp.tableNums)
-		} else {
-			coe = float32(tpp.finishTableNums) / float32(tpp.tableNums)
+	tpp.render(messages)
+}
+
+func (tpp *TableProgressPrinter) width() int {
+	if tpp.terminalWidth != nil {
+		return tpp.terminalWidth()
+	}
+	if file, ok := tpp.output.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
+		width, _, err := term.GetSize(int(file.Fd()))
+		if err == nil && width > 1 {
+			return width
 		}
 	}
-	numLeft := int(60 * coe)
-	percent := int(100 * coe)
-	if tpp.total > 0 {
-		fmt.Fprintf(tpp.output, "Progress [%s>%s] %d%% %d/%d\n", strings.Repeat("=", numLeft), strings.Repeat("-", 60-numLeft), percent, tpp.progress, tpp.total)
+	return 0
+}
+
+func (tpp *TableProgressPrinter) progressLine(width int) string {
+	var fraction float64
+	if tpp.tableNums > 0 {
+		fraction = float64(tpp.finishTableNums) / float64(tpp.tableNums)
+	}
+	fraction = min(1, max(0, fraction))
+	// Chunk totals are discovered lazily; only completed tables determine the
+	// percentage. Chunk activity remains visible even while a large table runs.
+	line := fmt.Sprintf("Progress %d%% | tables %d/%d | chunks %d/%d",
+		int(100*fraction), tpp.finishTableNums, tpp.tableNums, tpp.progress, tpp.total)
+	if width > 1 {
+		// Reserve the final column to avoid the terminal's automatic line wrap.
+		available := width - 1
+		if len(line) > available {
+			line = fmt.Sprintf("Progress %d%% | tables %d/%d", int(100*fraction), tpp.finishTableNums, tpp.tableNums)
+		}
+		if len(line) > available {
+			line = strings.TrimPrefix(line, "Progress ")
+		}
+		barWidth := min(24, available-len(line)-3)
+		if barWidth >= 8 {
+			filled := int(float64(barWidth) * fraction)
+			bar := strings.Repeat("=", filled) + strings.Repeat("-", barWidth-filled)
+			line = strings.Replace(line, "Progress ", "Progress ["+bar+"] ", 1)
+		}
+		if len(line) > available {
+			// Keep the table count ahead of the chunk counter in narrow windows.
+			line = line[:available]
+		}
+	}
+	return line
+}
+
+func (tpp *TableProgressPrinter) render(messages string) {
+	width := tpp.width()
+	line := tpp.progressLine(width)
+	if messages == "" && line == tpp.lastProgress {
+		return // idle ticks must not scroll the terminal or fill redirected logs
+	}
+	if width > 1 {
+		// Explicitly return to column zero; cursor-up alone retains the column.
+		fmt.Fprint(tpp.output, "\r\x1b[2K")
+		if messages != "" {
+			fmt.Fprint(tpp.output, strings.ReplaceAll(messages, "\n", "\r\n"))
+		}
+		fmt.Fprint(tpp.output, line) // no newline: redraw this same physical row
+		tpp.lineVisible = true
 	} else {
-		fmt.Fprintf(tpp.output, "Progress [%s>%s] %d blocks processed\n", strings.Repeat("=", numLeft), strings.Repeat("-", 60-numLeft), tpp.progress)
+		// Files, pipes and non-terminal consoles get ordinary append-only text.
+		fmt.Fprint(tpp.output, messages)
+		fmt.Fprintln(tpp.output, line)
+	}
+	tpp.lastProgress = line
+}
+
+func (tpp *TableProgressPrinter) endLine() {
+	if tpp.lineVisible {
+		fmt.Fprint(tpp.output, "\r\n")
+		tpp.lineVisible = false
 	}
 }
 

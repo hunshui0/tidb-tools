@@ -14,3 +14,4 @@ release/
 tmp/
 /toolkit/
 /db2_migration_cli/bin/
+/tidb-community-toolkit-v8.5.4-linux-amd64/
