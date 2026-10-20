@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -45,6 +46,8 @@ func ResolveDataPath(value string) (string, error) {
 	}
 	if len(value) >= 3 && ((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z')) && value[1] == ':' && (value[2] == '\\' || value[2] == '/') {
 		value = "/mnt/" + strings.ToLower(string(value[0])) + "/" + strings.ReplaceAll(value[3:], "\\", "/")
+		// Keep WSL paths in Linux form even when generating TOML on Windows.
+		return path.Clean(value), nil
 	}
 	return filepath.Abs(value)
 }

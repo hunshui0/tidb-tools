@@ -112,6 +112,9 @@ func TestResolvePriorityAndToolkitDiscovery(t *testing.T) {
 }
 
 func TestFindToolkitRejectsAmbiguousAndNonExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose Unix executable permission bits")
+	}
 	temp := t.TempDir()
 	for _, name := range []string{"a/tidb-lightning", "b/tidb-lightning"} {
 		path := filepath.Join(temp, name)
@@ -131,6 +134,9 @@ func TestFindToolkitRejectsAmbiguousAndNonExecutable(t *testing.T) {
 	if _, err := findToolkit(bad); err == nil || !strings.Contains(err.Error(), "not executable") {
 		t.Fatalf("non-executable error = %v", err)
 	}
+}
+
+func TestFindToolkitRejectsWindowsBinary(t *testing.T) {
 	exeDir := t.TempDir()
 	exe := filepath.Join(exeDir, "tidb-lightning.exe")
 	executable(t, exe, "exit 0")
