@@ -188,106 +188,172 @@ Get-FileHash -LiteralPath $archive -Algorithm SHA256
 `run.cmd` 只在当前进程中设置 `IBM_DB_HOME` 和 `PATH`，不会永久修改系统环境
 变量。`scripts/run-db2-local.ps1` 仍然只是开发辅助脚本，会检查 Go 并重新构建。
 
-### Linux amd64
+### Linux amd64 / 麒麟 V10 x86_64
 
-请在 Linux 或 WSL 中使用 Linux amd64 版 IBM CLI 驱动构建 Linux 发布包。
-不能复用 Windows 下的 `.local-tools/clidriver`。构建机器需要 Go、GCC 和 C
-开发工具链；目标运行机器不需要这些构建工具。在仓库根目录执行一条命令：
+推荐在 Linux x86_64 构建机上通过 Docker 生成便携包，构建机只需要 Docker 和 Git：
 
 ```sh
-sh ./scripts/package-linux.sh
+sh scripts/package-linux-portable.sh
 ```
 
-脚本会在缺少 Linux IBM CLI 时调用项目固定版本的安装器，并自动完成编译、
-依赖检查、文件复制、tar.gz 压缩和 SHA-256 校验。生成结果：
+该脚本使用固定摘要的 manylinux2014 构建镜像（glibc 2.17）和 Go 1.23.12，
+以 `-tags db2cli`、CGO 开启方式编译真实 DB2 连接器。
+IBM CLI 固定为 **11.5.9**，下载使用版本目录并验证 SHA-256，避免安装器自动
+下载要求新版 glibc 的驱动。不能仅将此版本设为 `CGO_ENABLED=0`，那会失去
+Linux 原生 DB2 连接能力。
+
+发布包包含完整 `clidriver/` 和 `runtime/`。后者携带 libstdc++、libgcc、
+libxml2 等实际依赖，`run.sh` 为当前进程设置库路径，无需目标机安装 Go、GCC
+或 IBM 客户端，也不修改系统环境或替换系统 libc。目标系统仍需要 x86_64、
+兼容的 Linux 内核、glibc 2.17 或更新版本及其匹配的动态加载器。
+此基线覆盖常见麒麟 V10 x86_64 环境，仍应在实际目标机验证。
+
+打包检查遍历**全部 ELF 文件**，包括程序、IBM 驱动、TLS/认证插件及附带运行库。
+任何文件要求高于 glibc 2.17 的符号时都会中止，避免只在新系统上通过 `ldd`
+就误判兼容。检查还会启动程序、加载 DB2 驱动并分配 ODBC 环境句柄；这些检查
+不需要数据库账号，不代表已验证真实数据库连接或数据比对。
+
+生成文件：
 
 ```text
-release/sync-diff-db2-linux-amd64/
 release/sync-diff-db2-linux-amd64.tar.gz
 release/sync-diff-db2-linux-amd64.tar.gz.sha256
 ```
 
-只检查工具和打包输入、不产生发布包：
+在目标机器解压后执行：
 
 ```sh
-sh ./scripts/package-linux.sh --validate-only
-```
-
-可通过环境变量修改输出和驱动目录：
-
-```sh
-OUTPUT_ROOT=/opt/release \
-DB2_TOOL_ROOT=/opt/db2-tools \
-sh ./scripts/package-linux.sh
-```
-
-脚本默认拒绝覆盖已有发布目录或压缩包。重新打包前请先移动或删除旧的发布输出。
-
-以下内容是打包脚本内部执行步骤的参考，正常使用时不需要逐条执行。
-
-先把 Linux CLI 驱动放到 `.local-tools-linux/clidriver`，然后执行：
-
-```sh
-set -eu
-
-REPO_ROOT=$(pwd)
-export IBM_DB_HOME="$REPO_ROOT/.local-tools-linux/clidriver"
-export CGO_ENABLED=1
-export CGO_CFLAGS="-I$IBM_DB_HOME/include"
-export CGO_LDFLAGS="-L$IBM_DB_HOME/lib"
-export LD_LIBRARY_PATH="$IBM_DB_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-VERSION=$(git describe --tags --dirty --always)
-BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-GIT_HASH=$(git rev-parse HEAD)
-GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-LDFLAGS="-s -w -X github.com/pingcap/tidb-tools/pkg/utils.Version=$VERSION -X github.com/pingcap/tidb-tools/pkg/utils.BuildTS=$BUILD_TIME -X github.com/pingcap/tidb-tools/pkg/utils.GitHash=$GIT_HASH -X github.com/pingcap/tidb-tools/pkg/utils.GitBranch=$GIT_BRANCH"
-
-PACKAGE_DIR="$REPO_ROOT/release/sync-diff-db2-linux-amd64"
-if [ -e "$PACKAGE_DIR" ]; then
-  echo "发布目录已经存在，请先移动或删除后再重新构建：$PACKAGE_DIR" >&2
-  exit 1
-fi
-mkdir -p "$PACKAGE_DIR"
-
-go build -tags db2cli -trimpath -ldflags "$LDFLAGS" \
-  -o "$PACKAGE_DIR/sync_diff_inspector" \
-  ./sync_diff_inspector
-
-cp -R "$IBM_DB_HOME" "$PACKAGE_DIR/clidriver"
-cp sync_diff_inspector/config/config_db2.toml "$PACKAGE_DIR/config.example.toml"
-cp README.md LICENSE "$PACKAGE_DIR/"
-chmod +x "$PACKAGE_DIR/sync_diff_inspector"
-
-LD_LIBRARY_PATH="$PACKAGE_DIR/clidriver/lib" ldd "$PACKAGE_DIR/sync_diff_inspector"
-tar -C "$REPO_ROOT/release" -czf \
-  "$REPO_ROOT/release/sync-diff-db2-linux-amd64.tar.gz" \
-  sync-diff-db2-linux-amd64
-sha256sum "$REPO_ROOT/release/sync-diff-db2-linux-amd64.tar.gz"
-```
-
-发布前必须检查 `ldd` 输出，不能存在任何 `not found` 依赖。为了提高 Linux
-兼容性，建议在计划支持的、glibc 版本最老的 Linux 发行版上构建。
-
-在目标 Linux 机器上解压发布包，把 `config.example.toml` 复制为
-`config.toml` 并填写连接配置，然后执行：
-
-```sh
+sha256sum -c sync-diff-db2-linux-amd64.tar.gz.sha256
+tar -xzf sync-diff-db2-linux-amd64.tar.gz
+cd sync-diff-db2-linux-amd64
+./run.sh --version
+cp config.example.toml config.toml
+# 编辑 config.toml，填写 DB2 和 TiDB 连接信息
 ./run.sh
 ```
 
-也可以指定其他配置文件：
+如需指定其他配置文件：`./run.sh /path/to/config.toml`。
+`./run.sh --help` 和 `./run.sh --template norm` 无需配置文件即可执行。
+默认输出使用相对路径 `./output`。
+
+可用 `OUTPUT_ROOT` 和 `DB2_TOOL_ROOT` 指定宿主机输出及缓存目录；输出已有同名
+包时会拒绝覆盖。旧缓存中的新版 CLI 驱动也会接受 ELF 检查，不能绕过兼容门槛。
+如需更换已有驱动，请先移动旧的 `clidriver/`，由脚本下载固定版本。
+
+`scripts/package-linux.sh` 是容器内入口，也可在已配置 Go、GCC、Python 3.9+、
+readelf 和 IBM CLI 的旧版 Linux 上直接执行；在新 glibc 主机上直接构建通常
+无法通过兼容检查。容器入口已配置所需工具和缓存。
+
+### 在 GitHub 上构建及发布 DB2 Linux 包
+
+[DB2 portable Linux release](.github/workflows/db2-release.yml) 在推送和 PR 时
+构建 Linux x86_64 包，并在**未安装任何额外依赖的 CentOS 7 容器**中解压启动
+程序及 IBM CLI 校验工具。普通运行的包可从 Actions artifacts 下载。
+
+提交并推送工作流及修改后，在需要发布的提交上创建新标签：
 
 ```sh
-./run.sh ./config-test.toml
+git tag db2-v0.1.0
+git push origin db2-v0.1.0
 ```
 
-`run.sh` 只为当前进程设置 `IBM_DB_HOME` 和 `LD_LIBRARY_PATH`，不会永久修改
-系统环境变量。
+只有构建和旧系统检查成功才会自动创建 GitHub Release，并上传包和 SHA-256。
+使用 GitHub 内置令牌，不需要另配密钥。手动运行按钮要求工作流已位于默认分支。
+此工作流仅发布 DB2 Linux x86_64 包；Windows 使用上面的现有打包脚本。
+DB2 ARM64 需要匹配架构的 IBM 原生 CLI 驱动，不使用 x86_64 驱动冒充支持。
 
-Windows、Linux、amd64 和 arm64 都需要各自独立的可执行文件及匹配的 IBM CLI
-驱动。只有在 IBM 提供对应架构 CLI 驱动时才能发布该架构。每个发布包都应在
-干净机器上解压验证；向组织外部分发 IBM CLI 前，还需要确认其再分发许可条款。
+## MySQL/TiDB 跨平台包
+
+除上面的 DB2 Linux 包外，以下流程发布不含 DB2 原生驱动的 MySQL/TiDB 包。
+普通包使用 `v*` 标签发布，DB2 包使用 `db2-v*` 标签发布。
+
+## Download packages
+
+GitHub Releases provide the following portable archives. Extract the archive;
+no Go installation is needed on the destination machine.
+
+| System | CPU | Archive suffix |
+| --- | --- | --- |
+| Linux | x86_64 / amd64 | `linux-amd64.tar.gz` |
+| Linux | ARM64 / aarch64 | `linux-arm64.tar.gz` |
+| Windows 10+ / Server 2016+ | x64 / amd64 | `windows-amd64.zip` |
+| Kylin V10 | x86_64 / amd64 | `kylin-v10-amd64.tar.gz` |
+| Kylin V10 | ARM64 / aarch64 | `kylin-v10-arm64.tar.gz` |
+
+Every archive includes `sync_diff_inspector` (or `sync_diff_inspector.exe`),
+sample configuration files in `config/`, usage instructions, and the license.
+Edit `config/config.toml` with your database connection information, then run:
+
+```sh
+# Linux / Kylin V10
+./sync_diff_inspector --version
+./sync_diff_inspector --config config/config.toml
+```
+
+```powershell
+# Windows PowerShell
+.\sync_diff_inspector.exe --version
+.\sync_diff_inspector.exe --config config/config.toml
+```
+
+Linux and Kylin archives use the same statically linked executable
+(`CGO_ENABLED=0`), without a glibc dependency. `amd64` builds use the baseline
+`GOAMD64=v1` instruction set. Match the package to the machine's CPU architecture
+(`uname -m` on Linux/Kylin). Kylin V10 packages still need verification on your
+actual target machines.
+LoongArch, MIPS and other CPU architectures are not included.
+GitHub Actions smoke-tests the Linux executables on Ubuntu and the Windows
+executable on Windows; it does not run a Kylin V10 virtual machine or database
+integration tests.
+
+These packages contain the current branch's MySQL/TiDB functionality. They do
+not include a DB2 driver. A DB2 build using IBM's native `clidriver` needs a
+separate compatibility check for that driver's glibc/libstdc++ requirements;
+disabling CGO is not a solution for a driver that requires CGO.
+
+Release assets also include `checksums.txt`. Verify downloads with
+`sha256sum --check checksums.txt` on Linux/Kylin (download all archives for that
+command), or compare an individual file using `sha256sum <archive>` or
+`Get-FileHash <archive> -Algorithm SHA256` in PowerShell.
+
+## Build and publish on GitHub
+
+The [Build and release workflow](.github/workflows/release.yml) builds Linux
+amd64, Linux arm64 and Windows amd64 on GitHub-hosted runners. A push, pull
+request, or manual **Actions → Build and release → Run workflow** run builds and
+smoke-tests all three targets. Download the packages from the run's artifacts
+(retained for 14 days). For the manual run button to appear, GitHub requires the
+workflow to exist on the repository's default branch.
+
+To publish a release, first push this workflow and your changes to the repository,
+then create a **new** version tag on the commit you want to release:
+
+```sh
+git switch feature/sync-diff-standalone
+git tag v0.1.0
+git push origin feature/sync-diff-standalone
+git push origin v0.1.0
+```
+
+A `v*` tag triggers all builds. Only when every build and smoke test succeeds
+does the workflow create a GitHub Release and upload the five archives and
+checksums. The workflow uses GitHub's built-in `GITHUB_TOKEN`; no personal token
+or additional secrets are needed. Repository/organization policy must allow
+GitHub Actions and the release job's `contents: write` permission. Use a new
+tag for each release; publishing an already existing Release fails rather than
+replacing its assets.
+
+To build the same archives locally, install Go 1.23.12 and Python 3, then run:
+
+```sh
+python3 scripts/build-release.py --os linux --arch amd64 --version v0.1.0
+python3 scripts/build-release.py --os linux --arch arm64 --version v0.1.0
+python3 scripts/build-release.py --os windows --arch amd64 --version v0.1.0
+```
+
+The script cross-compiles with CGO disabled and writes archives to `dist/`.
+It embeds the version, Git commit, branch/ref and UTC build time in the binary.
+Set `GOFLAGS=-p=2` to reduce compiler parallelism on machines with limited RAM.
 
 ## 保留的内部依赖包
 

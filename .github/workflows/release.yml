@@ -1,0 +1,103 @@
+name: Build and release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}/${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-24.04
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - os: windows
+            arch: amd64
+            runner: windows-2022
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: '0'
+      # Keep compiler memory usage within the hosted runner's limits.
+      GOFLAGS: -p=2
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          # Stay on the module's Go 1.23 line for its TiDB dependencies.
+          go-version: '1.23.12'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Build release packages
+        shell: bash
+        run: |
+          version="$(git describe --tags --always)"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="$GITHUB_REF_NAME"
+          fi
+          python scripts/build-release.py --os '${{ matrix.os }}' --arch '${{ matrix.arch }}' --version "$version"
+      - name: Smoke test packaged executable
+        shell: bash
+        run: |
+          mkdir smoke
+          if [[ '${{ matrix.os }}' == windows ]]; then
+            python -m zipfile -e dist/*.zip smoke
+            binary="$(find smoke -name sync_diff_inspector.exe -type f)"
+          else
+            tar -xzf dist/*-linux-*.tar.gz -C smoke
+            binary="$(find smoke -name sync_diff_inspector -type f)"
+            readelf -l "$binary" > smoke/elf-headers.txt
+            if grep -q INTERP smoke/elf-headers.txt; then
+              echo '::error::Linux executable must not require a dynamic loader'
+              exit 1
+            fi
+          fi
+          "$binary" --version
+          "$binary" --help
+          "$binary" --template norm > smoke/template.toml
+          test -s smoke/template.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: packages-*
+          merge-multiple: true
+          path: dist
+      - name: Generate checksums and publish
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          sha256sum *.tar.gz *.zip > checksums.txt
+          gh release create "$RELEASE_TAG" ./*.tar.gz ./*.zip checksums.txt \
+            --verify-tag --generate-notes --title "$RELEASE_TAG"

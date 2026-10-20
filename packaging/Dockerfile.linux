@@ -1,0 +1,13 @@
+# Build CGO against an old libc, rather than the GitHub runner's libc.
+FROM quay.io/pypa/manylinux2014_x86_64@sha256:2bd80fa8fca6b775a913b7e42fa410c5f2246fb6f7f8f3280b5d562e5ca5d63f
+
+RUN curl -fsSL --retry 3 https://go.dev/dl/go1.23.12.linux-amd64.tar.gz -o /tmp/go.tar.gz \
+    && echo 'd3847fef834e9db11bf64e3fb34db9c04db14e068eeb064f49af747010454f90  /tmp/go.tar.gz' | sha256sum -c - \
+    && tar -C /usr/local -xzf /tmp/go.tar.gz \
+    && rm /tmp/go.tar.gz
+
+ENV PATH="/usr/local/go/bin:/opt/python/cp311-cp311/bin:${PATH}" \
+    GOFLAGS="-p=2" \
+    GOCACHE="/cache/build" \
+    GOPATH="/cache/go"
+WORKDIR /src

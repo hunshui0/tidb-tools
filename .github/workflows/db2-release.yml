@@ -1,0 +1,71 @@
+name: DB2 portable Linux release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['db2-v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@v4
+        with:
+          path: .local-tools-linux/cache
+          key: db2-linux-go123-${{ hashFiles('go.sum', 'packaging/Dockerfile.linux') }}
+      - name: Build against glibc 2.17
+        run: sh scripts/package-linux-portable.sh
+      - name: Extract and run on CentOS 7 without installing dependencies
+        run: |
+          mkdir extracted
+          tar -xzf release/sync-diff-db2-linux-amd64.tar.gz -C extracted
+          docker run --rm -v "$PWD/extracted:/packages:ro" quay.io/centos/centos:7 sh -ec '
+            getconf GNU_LIBC_VERSION
+            cd /packages/sync-diff-db2-linux-amd64
+            ./run.sh --version
+            ./run.sh --help
+            ./run.sh --template norm > /tmp/template.toml
+            test -s /tmp/template.toml
+            export IBM_DB_HOME="$PWD/clidriver"
+            export LD_LIBRARY_PATH="$PWD/runtime:$IBM_DB_HOME/lib:$IBM_DB_HOME/lib/icc"
+            clidriver/bin/db2cli validate > /tmp/db2-cli.txt
+            grep "DB2 v11.5.9" /tmp/db2-cli.txt
+          '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: db2-linux-amd64
+          path: |
+            release/*.tar.gz
+            release/*.sha256
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/db2-v') && github.event_name != 'pull_request'
+    needs: linux
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: db2-linux-amd64
+          path: release
+      - name: Publish DB2 release
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          sha256sum -c *.sha256
+          gh release create "$RELEASE_TAG" ./*.tar.gz ./*.sha256 \
+            --verify-tag --generate-notes --title "$RELEASE_TAG"
